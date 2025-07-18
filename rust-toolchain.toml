@@ -1,0 +1,5 @@
+[toolchain]
+channel = "nightly"
+# You can optionally pin to a specific nightly date if needed for stability:
+# channel = "nightly-2024-07-15"
+# components = ["rust-src", "rustfmt", "clippy"] # Optional: list components you need
