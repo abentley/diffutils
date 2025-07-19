@@ -8,7 +8,12 @@
     rust-bin.inputs.nixpkgs.follows = "nixpkgs"; # This tells rust-bin to use *your* nixpkgs
   };
 
-  outputs = { self, nixpkgs, rust-bin }:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      rust-bin,
+    }:
     let
       # Define the system architecture
       system = "x86_64-linux";
@@ -24,11 +29,13 @@
       # and provide the appropriate rustc and cargo.
       rustToolchain = pkgs.rust-bin.fromRustupToolchainFile (toString ./rust-toolchain.toml);
 
-    in {
+    in
+    {
       devShells.${system}.default = pkgs.mkShell {
         # Add the rustToolchain to your buildInputs
         buildInputs = [
           rustToolchain
+          pkgs.ed
           # Add any other tools you need, e.g., for C/C++ dependencies if any
           # pkgs.pkg-config
           # pkgs.openssl
