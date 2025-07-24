@@ -14,6 +14,7 @@ use std::{
 mod cmp;
 mod context_diff;
 mod diff;
+mod diff3;
 mod ed_diff;
 mod macros;
 mod normal_diff;
