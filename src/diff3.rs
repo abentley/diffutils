@@ -1,4 +1,6 @@
-use diff::Result as DiffResult;
+use std::env::ArgsOs;
+use std::process::{ExitCode};
+use std::iter::Peekable;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 enum MatchingVersions {
@@ -17,50 +19,83 @@ struct Line<T: PartialEq>  {
     versions: MatchingVersions
 }
 
-fn match_sequence<'a, T: PartialEq + std::fmt::Debug>(myfile: &'a [T], oldfile:  &'a [T], yourfile:  &'a [T]) -> Vec<Line<&'a T>> {
+fn match_sequence<'a, T: PartialEq + std::fmt::Debug>(
+    myfile: &'a [T], oldfile:  &'a [T], yourfile:  &'a [T]) -> Vec<Line<&'a T>> {
     use diff::Result::*;
     use MatchingVersions::*;
     let mut output = vec![];
     let mut old_your = diff::slice(oldfile, yourfile).into_iter();
+    let mut left_lines = vec![];
+    let mut right_lines = vec![];
     for result in diff::slice(myfile, oldfile) {
         let (maybe_combiner, line) = match result {
             Left(line) => (None, line),
             Right(line) => (Some(false), line),
             Both(line, _) => (Some(true), line),
         };
-        if let Some(combiner) = maybe_combiner {
+        if let Some(has_my) = maybe_combiner {
             for r_line in &mut old_your {
                 let versions = match r_line {
                     Right(x) => {
-                        output.push(Line{line: x, versions: Your});
+                        right_lines.push(x);
                         continue
                     },
-                    Left(_) if combiner => MyOld,
+                    Left(_) if has_my => MyOld,
                     Left(_) => Old,
-                    Both(_,_) if combiner => MyOldYour,
+                    Both(_,_) if has_my => MyOldYour,
                     Both(_,_) => OldYour,
                 };
+                eprintln!("ll {:?}", left_lines);
+                eprintln!("rl {:?}", right_lines);
+                eprintln!("ver {:?}", versions);
+                for sides_result in diff::slice(&left_lines, &right_lines) {
+                    output.push(match sides_result {
+                        Left(line) => Line{line: *line, versions: My},
+                        Right(line) => Line{line: *line, versions: Your},
+                        Both(line, _) => Line{line: *line, versions: MyYour},
+                    });
+                }
+                left_lines.clear();
+                right_lines.clear();
                 output.push(Line{line, versions});
                 break
             }
         } else {
-            output.push(Line{line, versions: My});
+            left_lines.push(line)
         }
     }
-    for result in old_your {
-        let Right(line) = result else {
+    for result in &mut old_your {
+        let Right(x) = result else {
             panic!("Should not have anything other than right lines or we missed a match.  Got{:?}", result);
         };
-        output.push(Line{line: line, versions: Your});
+        right_lines.push(x);
+    }
+    eprintln!("ll {:?}", left_lines);
+    eprintln!("rl {:?}", right_lines);
+    for sides_result in diff::slice(&left_lines, &right_lines) {
+        output.push(match sides_result {
+            Left(line) => Line{line: *line, versions: My},
+            Right(line) => Line{line: *line, versions: Your},
+            Both(line, _) => Line{line: *line, versions: MyYour},
+        });
     }
     output
 }
 
+pub fn main(opts: Peekable<ArgsOs>) -> ExitCode {
+    let opts: Vec<_> = opts.collect();
+    let mut opts_iter = opts.into_iter();
+    opts_iter.next();
+    let mine = opts_iter.next().unwrap();
+    let old = opts_iter.next().unwrap();
+    let theirs = &opts_iter.next().unwrap();
+    eprintln!("{:?} {:?} {:?}", mine, old, theirs);
+    ExitCode::from(0)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use diff::Result as DiffResult;
     use MatchingVersions::*;
 
     fn input(ink: &str) -> Vec<char>{
@@ -90,5 +125,12 @@ mod tests {
             Line {line: &'b', versions: Your},
             Line {line: &'c', versions: Your},
         ], match_sequence(&input("a"), &input("a"), &input("abc")))
+    }
+    #[test]
+    fn test_match_my_your() {
+        assert_eq!(vec![
+            Line {line: &'b', versions: MyYour},
+            Line {line: &'c', versions: MyOldYour},
+        ], match_sequence(&input("bc"), &input("c"), &input("bc")))
     }
 }
