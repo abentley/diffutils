@@ -1,7 +1,10 @@
 use std::env::ArgsOs;
 use std::ffi::OsString;
 use std::fmt::Display;
+use std::fs;
+use std::io::{BufRead, BufReader, Read};
 use std::iter::Peekable;
+use std::os::unix::ffi::OsStringExt;
 use std::process::ExitCode;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -15,10 +18,36 @@ enum MatchingVersions {
     Your,
 }
 
+impl MatchingVersions {
+    fn as_tuple(&self) -> (bool, bool, bool) {
+        use MatchingVersions::*;
+        match &self {
+            MyOldYour => (true, true, true),
+            OldYour => (false, true, true),
+            MyYour => (true, false, true),
+            MyOld => (true, true, false),
+            My => (true, false, false),
+            Old => (false, true, false),
+            Your => (false, false, true),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 struct Line<T: PartialEq> {
     line: T,
     versions: MatchingVersions,
+}
+
+impl Display for Line<&Vec<u8>> {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        let (mine, old, theirs) = self.versions.as_tuple();
+        let m_s = if mine { "<" } else { " " };
+        let o_s = if old { "!" } else { " " };
+        let t_s = if theirs { ">" } else { " " };
+        let l2 = OsString::from_vec(self.line.clone());
+        write!(fmt, "{m_s}{o_s}{t_s} {}", l2.to_string_lossy())
+    }
 }
 
 fn match_sequence<'a, T: PartialEq + std::fmt::Debug>(
@@ -50,9 +79,6 @@ fn match_sequence<'a, T: PartialEq + std::fmt::Debug>(
                     Both(_, _) if has_my => MyOldYour,
                     Both(_, _) => OldYour,
                 };
-                eprintln!("ll {:?}", left_lines);
-                eprintln!("rl {:?}", right_lines);
-                eprintln!("ver {:?}", versions);
                 for sides_result in diff::slice(&left_lines, &right_lines) {
                     output.push(match sides_result {
                         Left(line) => Line {
@@ -87,8 +113,6 @@ fn match_sequence<'a, T: PartialEq + std::fmt::Debug>(
         };
         right_lines.push(x);
     }
-    eprintln!("ll {:?}", left_lines);
-    eprintln!("rl {:?}", right_lines);
     for sides_result in diff::slice(&left_lines, &right_lines) {
         output.push(match sides_result {
             Left(line) => Line {
@@ -110,6 +134,14 @@ fn match_sequence<'a, T: PartialEq + std::fmt::Debug>(
 
 enum Error {
     MissingOperand,
+    NoSuch(OsString),
+    IOError(std::io::Error),
+}
+
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Error {
+        Error::IOError(e)
+    }
 }
 
 impl Display for Error {
@@ -117,6 +149,12 @@ impl Display for Error {
         match &self {
             Error::MissingOperand => {
                 write!(fmt, "missing operand")?;
+            }
+            Error::NoSuch(file) => {
+                write!(fmt, "{file:?}: No such file or directory")?;
+            }
+            Error::IOError(e) => {
+                e.fmt(fmt)?;
             }
         }
         Ok(())
@@ -130,6 +168,14 @@ fn next_file<T: Iterator<Item = OsString>>(opts_iter: &mut T) -> Result<OsString
     Ok(x)
 }
 
+fn bsplit(theirs: &OsString) -> Result<Vec<Vec<u8>>, Error> {
+    let contents = fs::read(theirs)?;
+    Ok(contents
+        .split_inclusive(|x| *x == b'\n')
+        .map(|x| x.to_owned())
+        .collect())
+}
+
 fn real_main(opts: Peekable<ArgsOs>) -> Result<(), Error> {
     let opts: Vec<_> = opts.collect();
     let mut opts_iter = opts.into_iter();
@@ -138,6 +184,13 @@ fn real_main(opts: Peekable<ArgsOs>) -> Result<(), Error> {
     let old = next_file(&mut opts_iter)?;
     let theirs = next_file(&mut opts_iter)?;
     eprintln!("{:?} {:?} {:?}", mine, old, theirs);
+    let mine_lines = bsplit(&mine)?;
+    let old_lines = bsplit(&old)?;
+    let theirs_lines = bsplit(&theirs)?;
+    let matches = match_sequence(&mine_lines, &old_lines, &theirs_lines);
+    for match_ in matches {
+        eprint!("{}", match_)
+    }
     Ok(())
 }
 
