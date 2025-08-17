@@ -6,6 +6,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::iter::Peekable;
 use std::os::unix::ffi::OsStringExt;
 use std::process::ExitCode;
+use std::vec::Vec;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 enum MatchingVersions {
@@ -48,6 +49,37 @@ impl Display for Line<&Vec<u8>> {
         let l2 = OsString::from_vec(self.line.clone());
         write!(fmt, "{m_s}{o_s}{t_s} {}", l2.to_string_lossy())
     }
+}
+
+#[derive(Debug, PartialEq)]
+struct Lines<T: PartialEq> {
+    lines: Vec<T>,
+    versions: MatchingVersions,
+}
+
+fn group_lines<T: PartialEq>(src: Vec<Line<T>>) -> Vec<Lines<T>> {
+    let mut output: Vec<_> = vec![];
+    for line in src {
+        let mut tcur: Option<&mut Lines<T>> = output.last_mut();
+        if let Some(x) = &tcur {
+            if line.versions != x.versions {
+                tcur = None
+            }
+        }
+        let cur = if let Some(cur) = tcur {
+            cur
+        } else {
+            output.push(Lines {
+                versions: line.versions,
+                lines: vec![],
+            });
+            output
+                .last_mut()
+                .expect("The item we just pushed should still be there.")
+        };
+        cur.lines.push(line.line);
+    }
+    output
 }
 
 fn match_sequence<'a, T: PartialEq + std::fmt::Debug>(
@@ -286,6 +318,54 @@ mod tests {
                 },
             ],
             match_sequence(&input("bc"), &input("c"), &input("bc"))
+        )
+    }
+    #[test]
+    fn test_group_lines_consolidates() {
+        assert_eq!(
+            vec![Lines {
+                lines: vec!["a", "b"],
+                versions: MyOldYour
+            }],
+            group_lines(vec![
+                Line {
+                    line: "a",
+                    versions: MyOldYour
+                },
+                Line {
+                    line: "b",
+                    versions: MyOldYour
+                },
+            ])
+        )
+    }
+    #[test]
+    fn test_group_lines_different_versions() {
+        assert_eq!(
+            vec![
+                Lines {
+                    lines: vec!["a", "b"],
+                    versions: MyOldYour
+                },
+                Lines {
+                    lines: vec!["c"],
+                    versions: My
+                },
+            ],
+            group_lines(vec![
+                Line {
+                    line: "a",
+                    versions: MyOldYour
+                },
+                Line {
+                    line: "b",
+                    versions: MyOldYour
+                },
+                Line {
+                    line: "c",
+                    versions: My
+                },
+            ])
         )
     }
 }
