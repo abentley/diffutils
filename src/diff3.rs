@@ -2,7 +2,7 @@ use std::env::ArgsOs;
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::Write;
 use std::iter::Peekable;
 use std::os::unix::ffi::OsStringExt;
 use std::process::ExitCode;
@@ -51,33 +51,82 @@ impl Display for Line<&Vec<u8>> {
     }
 }
 
-#[derive(Debug, PartialEq)]
-struct Lines<T: PartialEq> {
-    lines: Vec<T>,
-    versions: MatchingVersions,
+#[derive(Debug)]
+struct MergeLines<T: PartialEq> {
+    common_lines: Vec<T>,
+    my_lines: Vec<T>,
+    old_lines: Vec<T>,
+    your_lines: Vec<T>,
 }
 
-fn group_lines<T: PartialEq>(src: Vec<Line<T>>) -> Vec<Lines<T>> {
+impl<T: PartialEq> MergeLines<T> {
+    fn has_conflict(&self) -> bool {
+        self.my_lines != vec![] || self.old_lines != vec![] || self.your_lines != vec![]
+    }
+    fn new() -> Self {
+        Self {
+            common_lines: vec![],
+            my_lines: vec![],
+            old_lines: vec![],
+            your_lines: vec![],
+        }
+    }
+}
+
+impl MergeLines<&Vec<u8>> {
+    fn dump(&self) -> Result<(), std::io::Error> {
+        let mut stdout = std::io::stdout();
+        for line in &self.common_lines {
+            stdout.write_all(line)?;
+        }
+        if !self.has_conflict() {
+            return Ok(());
+        }
+        stdout.write_all(b"<<<<<<<\n")?;
+        for line in &self.my_lines {
+            stdout.write_all(line)?;
+        }
+        stdout.write_all(b"!!!!!!!\n")?;
+        for line in &self.old_lines {
+            stdout.write_all(line)?;
+        }
+        stdout.write_all(b"=======\n")?;
+        for line in &self.your_lines {
+            stdout.write_all(line)?;
+        }
+        Ok(())
+    }
+}
+
+fn make_merged<T: PartialEq + Copy>(lines: Vec<Line<T>>) -> Vec<MergeLines<T>> {
+    use MatchingVersions::*;
     let mut output: Vec<_> = vec![];
-    for line in src {
-        let mut tcur: Option<&mut Lines<T>> = output.last_mut();
-        if let Some(x) = &tcur {
-            if line.versions != x.versions {
-                tcur = None
+    for line in lines {
+        let mut cur: Option<&mut MergeLines<T>> = output.last_mut();
+        if let Some(ref lcur) = cur {
+            if line.versions == MyOldYour && lcur.has_conflict() {
+                cur = None;
             }
         }
-        let cur = if let Some(cur) = tcur {
-            cur
+        if cur.is_none() {
+            output.push(MergeLines::new());
+            cur = output.last_mut();
+        }
+        let cur: &mut MergeLines<T> = cur.expect("There must be something by now.");
+        if line.versions == MyOldYour {
+            cur.common_lines.push(line.line);
         } else {
-            output.push(Lines {
-                versions: line.versions,
-                lines: vec![],
-            });
-            output
-                .last_mut()
-                .expect("The item we just pushed should still be there.")
-        };
-        cur.lines.push(line.line);
+            let (my_b, old_b, your_b) = line.versions.as_tuple();
+            if my_b {
+                cur.my_lines.push(line.line)
+            }
+            if old_b {
+                cur.old_lines.push(line.line)
+            }
+            if your_b {
+                cur.your_lines.push(line.line)
+            }
+        }
     }
     output
 }
@@ -139,8 +188,7 @@ fn match_sequence<'a, T: PartialEq + std::fmt::Debug>(
     for result in &mut old_your {
         let Right(x) = result else {
             panic!(
-                "Should not have anything other than right lines or we missed a match.  Got{:?}",
-                result
+                "Should not have anything other than right lines or we missed a match.  Got{result:?}",
             );
         };
         right_lines.push(x);
@@ -167,12 +215,12 @@ fn match_sequence<'a, T: PartialEq + std::fmt::Debug>(
 enum Error {
     MissingOperand,
     NoSuch(OsString),
-    IOError(std::io::Error),
+    IO(std::io::Error),
 }
 
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Error {
-        Error::IOError(e)
+        Error::IO(e)
     }
 }
 
@@ -185,7 +233,7 @@ impl Display for Error {
             Error::NoSuch(file) => {
                 write!(fmt, "{file:?}: No such file or directory")?;
             }
-            Error::IOError(e) => {
+            Error::IO(e) => {
                 e.fmt(fmt)?;
             }
         }
@@ -215,13 +263,14 @@ fn real_main(opts: Peekable<ArgsOs>) -> Result<(), Error> {
     let mine = next_file(&mut opts_iter)?;
     let old = next_file(&mut opts_iter)?;
     let theirs = next_file(&mut opts_iter)?;
-    eprintln!("{:?} {:?} {:?}", mine, old, theirs);
+    eprintln!("{mine:?} {old:?} {theirs:?}");
     let mine_lines = bsplit(&mine)?;
     let old_lines = bsplit(&old)?;
     let theirs_lines = bsplit(&theirs)?;
     let matches = match_sequence(&mine_lines, &old_lines, &theirs_lines);
-    for match_ in matches {
-        eprint!("{}", match_)
+    let merged = make_merged(matches);
+    for match_ in merged {
+        match_.dump()?
     }
     Ok(())
 }
@@ -318,54 +367,6 @@ mod tests {
                 },
             ],
             match_sequence(&input("bc"), &input("c"), &input("bc"))
-        )
-    }
-    #[test]
-    fn test_group_lines_consolidates() {
-        assert_eq!(
-            vec![Lines {
-                lines: vec!["a", "b"],
-                versions: MyOldYour
-            }],
-            group_lines(vec![
-                Line {
-                    line: "a",
-                    versions: MyOldYour
-                },
-                Line {
-                    line: "b",
-                    versions: MyOldYour
-                },
-            ])
-        )
-    }
-    #[test]
-    fn test_group_lines_different_versions() {
-        assert_eq!(
-            vec![
-                Lines {
-                    lines: vec!["a", "b"],
-                    versions: MyOldYour
-                },
-                Lines {
-                    lines: vec!["c"],
-                    versions: My
-                },
-            ],
-            group_lines(vec![
-                Line {
-                    line: "a",
-                    versions: MyOldYour
-                },
-                Line {
-                    line: "b",
-                    versions: MyOldYour
-                },
-                Line {
-                    line: "c",
-                    versions: My
-                },
-            ])
         )
     }
 }
