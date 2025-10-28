@@ -51,3 +51,6 @@ When I ask you to re-read a file, always re-read it.
 
 *   **Test Structure**: Organize unit tests into separate `unittest.TestCase` classes for each function or class under test. This improves test isolation and discoverability.
 *   **Dependency Injection in Tests**: Use dependency injection in tests by passing mock objects as dependencies, rather than relying on global patching, to make tests more explicit and robust.
+
+### **File format**
+*   All text files you create should use LF line endings.  Any file you create or update that has LF line endings should end with an LF.  Files you update that have CRLF line endings should not end with a line ending.
