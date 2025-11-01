@@ -74,8 +74,7 @@ impl<T: PartialEq> MergeLines<T> {
 }
 
 impl MergeLines<&Vec<u8>> {
-    fn dump(&self) -> Result<(), std::io::Error> {
-        let mut stdout = std::io::stdout();
+    fn dump(&self, stdout: &mut impl Write) -> Result<(), std::io::Error> {
         for line in &self.common_lines {
             stdout.write_all(line)?;
         }
@@ -94,6 +93,7 @@ impl MergeLines<&Vec<u8>> {
         for line in &self.your_lines {
             stdout.write_all(line)?;
         }
+        stdout.write_all(b">>>>>>>\n")?;
         Ok(())
     }
 }
@@ -270,7 +270,7 @@ fn real_main(opts: Peekable<ArgsOs>) -> Result<(), Error> {
     let matches = match_sequence(&mine_lines, &old_lines, &theirs_lines);
     let merged = make_merged(matches);
     for match_ in merged {
-        match_.dump()?
+        match_.dump(&mut std::io::stdout())?
     }
     Ok(())
 }
