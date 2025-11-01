@@ -2,3 +2,4 @@
 *.swp
 /.cargo
 /diff_outputs
+/__pycache__
