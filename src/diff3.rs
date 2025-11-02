@@ -248,12 +248,20 @@ fn next_file<T: Iterator<Item = OsString>>(opts_iter: &mut T) -> Result<OsString
     Ok(x)
 }
 
+fn split(contents: &Vec<u8>) -> impl Iterator<Item = &[u8]>{
+    contents
+        .split_inclusive(|x| *x == b'\n')
+}
+
+fn vsplit(contents: &Vec<u8>) -> Vec<Vec<u8>> {
+        split(&contents)
+        .map(|x| x.to_owned())
+        .collect()
+}
+
 fn bsplit(theirs: &OsString) -> Result<Vec<Vec<u8>>, Error> {
     let contents = fs::read(theirs)?;
-    Ok(contents
-        .split_inclusive(|x| *x == b'\n')
-        .map(|x| x.to_owned())
-        .collect())
+    Ok(vsplit(&contents))
 }
 
 fn real_main(opts: Peekable<ArgsOs>) -> Result<(), Error> {
@@ -368,5 +376,23 @@ mod tests {
             ],
             match_sequence(&input("bc"), &input("c"), &input("bc"))
         )
+    }
+    #[test]
+    fn dump_basic(){
+        let common_lines:Vec<u8> = b"common\n".to_owned().into_iter().collect();
+        let my_lines:Vec<u8> = b"my\n".to_owned().into_iter().collect();
+        let old_lines:Vec<u8> = b"old\n".to_owned().into_iter().collect();
+        let your_lines:Vec<u8> = b"your\n".to_owned().into_iter().collect();
+        let ml = MergeLines::<&Vec<u8>> {
+            common_lines: vec![&common_lines],
+            my_lines: vec![&my_lines],
+            old_lines: vec![&old_lines],
+            your_lines: vec![&your_lines],
+        };
+        let mut result = vec![];
+        ml.dump(&mut result);
+        assert_eq!(String::from_utf8_lossy(&result), String::from_utf8_lossy(
+        b"common\n<<<<<<<\nmy\n!!!!!!!\nold\n=======\nyour\n>>>>>>>\n"
+        ));
     }
 }
