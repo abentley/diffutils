@@ -248,7 +248,7 @@ fn next_file<T: Iterator<Item = OsString>>(opts_iter: &mut T) -> Result<OsString
     Ok(x)
 }
 
-fn split(contents: &Vec<u8>) -> impl Iterator<Item = &[u8]>{
+fn split<'a>(contents: &'a[u8]) -> impl Iterator<Item = &'a [u8]>{
     contents
         .split_inclusive(|x| *x == b'\n')
 }
@@ -380,10 +380,10 @@ mod tests {
     }
     #[test]
     fn dump_basic(){
-        let common_lines:Vec<u8> = b"common\n".to_owned().into_iter().collect();
-        let my_lines:Vec<u8> = b"my\n".to_owned().into_iter().collect();
-        let old_lines:Vec<u8> = b"old\n".to_owned().into_iter().collect();
-        let your_lines:Vec<u8> = b"your\n".to_owned().into_iter().collect();
+        let common_lines = b"common\n".into();
+        let my_lines = b"my\n".into();
+        let old_lines = b"old\n".into();
+        let your_lines = b"your\n".into();
         let ml = MergeLines::<&Vec<u8>> {
             common_lines: vec![&common_lines],
             my_lines: vec![&my_lines],
