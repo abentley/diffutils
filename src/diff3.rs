@@ -296,6 +296,7 @@ pub fn main(opts: Peekable<ArgsOs>) -> ExitCode {
 mod tests {
     use super::*;
     use MatchingVersions::*;
+    use indoc::indoc;
 
     fn input(ink: &str) -> Vec<char> {
         ink.chars().collect()
@@ -391,8 +392,17 @@ mod tests {
         };
         let mut result = vec![];
         ml.dump(&mut result);
-        assert_eq!(String::from_utf8_lossy(&result), String::from_utf8_lossy(
-        b"common\n<<<<<<<\nmy\n!!!!!!!\nold\n=======\nyour\n>>>>>>>\n"
+        assert_eq!(String::from_utf8_lossy(&result), String::from(
+        indoc!{"
+            common
+            <<<<<<<
+            my
+            !!!!!!!
+            old
+            =======
+            your
+            >>>>>>>
+        "}
         ));
     }
 }
