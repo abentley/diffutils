@@ -391,9 +391,8 @@ mod tests {
             your_lines: vec![&your_lines],
         };
         let mut result = vec![];
-        ml.dump(&mut result);
-        assert_eq!(String::from_utf8_lossy(&result), String::from(
-        indoc!{"
+        ml.dump(&mut result).expect("Succeeds because result is a Vec.");
+        assert_eq!(String::from_utf8_lossy(&result), String::from(indoc!("
             common
             <<<<<<<
             my
@@ -402,7 +401,6 @@ mod tests {
             =======
             your
             >>>>>>>
-        "}
-        ));
+        ")));
     }
 }
