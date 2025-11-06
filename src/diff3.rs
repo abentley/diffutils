@@ -4,7 +4,7 @@ use std::fmt::Display;
 use std::fs;
 use std::io::Write;
 use std::iter::Peekable;
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStringExt,OsStrExt};
 use std::process::ExitCode;
 use std::vec::Vec;
 
@@ -51,6 +51,20 @@ impl Display for Line<&Vec<u8>> {
     }
 }
 
+#[derive(Debug, PartialEq)]
+enum MergeOutcome {
+    Conflict,
+    MyWins,
+    YourWins,
+    /**
+     * This is the case where both sides match but don't match base.
+     * With -E, this simply emits the my/your text, honouring the agreement (that was presumably
+     * achieved out-of-band, or via deterministic mechanism).  Without -E, it emits a conflict
+     * between base and Your!!!
+     **/
+    FlukeAgreement,
+}
+
 #[derive(Debug)]
 struct MergeLines<T: PartialEq> {
     common_lines: Vec<T>,
@@ -71,31 +85,86 @@ impl<T: PartialEq> MergeLines<T> {
             your_lines: vec![],
         }
     }
+    fn calculate_merge(&self) -> MergeOutcome {
+        use MergeOutcome::*;
+        if self.my_lines == self.old_lines {
+            YourWins
+        } else if self.your_lines == self.old_lines {
+            MyWins
+        } else if self.your_lines == self.my_lines {
+            FlukeAgreement
+        } else {
+            Conflict
+        }
+    }
 }
 
-impl MergeLines<&Vec<u8>> {
-    fn dump(&self, stdout: &mut impl Write) -> Result<(), std::io::Error> {
+impl<T: AsRef<Vec<u8>> + PartialEq> MergeLines<T> {
+    fn dump(&self, labels: &MergeLabels, merge_outcome: MergeOutcome, include_old: bool, stdout: &mut impl Write) -> Result<(), std::io::Error> {
+        use MergeOutcome::*;
         for line in &self.common_lines {
-            stdout.write_all(line)?;
+            stdout.write_all(line.as_ref())?;
         }
         if !self.has_conflict() {
             return Ok(());
         }
-        stdout.write_all(b"<<<<<<<\n")?;
-        for line in &self.my_lines {
-            stdout.write_all(line)?;
-        }
-        stdout.write_all(b"!!!!!!!\n")?;
-        for line in &self.old_lines {
-            stdout.write_all(line)?;
-        }
-        stdout.write_all(b"=======\n")?;
-        for line in &self.your_lines {
-            stdout.write_all(line)?;
-        }
-        stdout.write_all(b">>>>>>>\n")?;
+
+        match merge_outcome {
+            Conflict => {
+                let middle = if include_old {Some((&self.old_lines, &labels.old))} else {None};
+                write_conflict((&self.my_lines, &labels.mine), middle, (&self.your_lines, &labels.theirs), stdout)?;
+            }
+            MyWins => {
+                for line in &self.my_lines {
+                    stdout.write_all(line.as_ref())?;
+                }
+            }
+            YourWins => {
+                for line in &self.your_lines {
+                    stdout.write_all(line.as_ref())?;
+                }
+            }
+            FlukeAgreement => {
+                if include_old {
+                    write_conflict((&self.old_lines, &labels.old), None, (&self.your_lines, &labels.theirs), stdout)?;
+                }
+                else {
+                    for line in &self.your_lines {
+                        stdout.write_all(line.as_ref())?;
+                    }
+                }
+            }
+        };
         Ok(())
     }
+    fn merge(&self, labels: &MergeLabels, include_old: bool, stdout: &mut impl Write) -> Result<(), std::io::Error>{
+        self.dump(&labels, self.calculate_merge(), include_old, stdout)
+    }
+}
+
+fn write_conflict<T: AsRef<Vec<u8>> >(first: (&Vec<T>, &OsString), middle: Option<(&Vec<T>, &OsString)>, last: (&Vec<T>, &OsString), stdout: &mut impl Write) -> Result<(), std::io::Error> {
+    stdout.write_all(b"<<<<<<< ")?;
+    stdout.write_all(first.1.as_bytes())?;
+    stdout.write_all(b"\n")?;
+    for line in first.0 {
+        stdout.write_all(line.as_ref())?;
+    }
+    if let Some(middle) = middle {
+        stdout.write_all(b"||||||| ")?;
+        stdout.write_all(middle.1.as_bytes())?;
+        stdout.write_all(b"\n")?;
+        for line in middle.0 {
+            stdout.write_all(line.as_ref())?;
+        }
+    }
+    stdout.write_all(b"=======\n")?;
+    for line in last.0 {
+        stdout.write_all(line.as_ref())?;
+    }
+    stdout.write_all(b">>>>>>> ")?;
+    stdout.write_all(last.1.as_bytes())?;
+    stdout.write_all(b"\n")?;
+    Ok(())
 }
 
 fn make_merged<T: PartialEq + Copy>(lines: Vec<Line<T>>) -> Vec<MergeLines<T>> {
@@ -253,7 +322,7 @@ fn split<'a>(contents: &'a[u8]) -> impl Iterator<Item = &'a [u8]>{
         .split_inclusive(|x| *x == b'\n')
 }
 
-fn vsplit(contents: &Vec<u8>) -> Vec<Vec<u8>> {
+fn vsplit(contents: &[u8]) -> Vec<Vec<u8>> {
         split(&contents)
         .map(|x| x.to_owned())
         .collect()
@@ -264,21 +333,28 @@ fn bsplit(theirs: &OsString) -> Result<Vec<Vec<u8>>, Error> {
     Ok(vsplit(&contents))
 }
 
+struct MergeLabels {
+    mine: OsString,
+    old: OsString,
+    theirs: OsString,
+}
+
 fn real_main(opts: Peekable<ArgsOs>) -> Result<(), Error> {
     let opts: Vec<_> = opts.collect();
     let mut opts_iter = opts.into_iter();
     opts_iter.next();
-    let mine = next_file(&mut opts_iter)?;
-    let old = next_file(&mut opts_iter)?;
-    let theirs = next_file(&mut opts_iter)?;
-    eprintln!("{mine:?} {old:?} {theirs:?}");
-    let mine_lines = bsplit(&mine)?;
-    let old_lines = bsplit(&old)?;
-    let theirs_lines = bsplit(&theirs)?;
+    let files = MergeLabels {
+        mine: next_file(&mut opts_iter)?,
+        old: next_file(&mut opts_iter)?,
+        theirs: next_file(&mut opts_iter)?,
+    };
+    let mine_lines = bsplit(&files.mine)?;
+    let old_lines = bsplit(&files.old)?;
+    let theirs_lines = bsplit(&files.theirs)?;
     let matches = match_sequence(&mine_lines, &old_lines, &theirs_lines);
     let merged = make_merged(matches);
     for match_ in merged {
-        match_.dump(&mut std::io::stdout())?
+        match_.merge(&files, true, &mut std::io::stdout())?
     }
     Ok(())
 }
@@ -378,29 +454,150 @@ mod tests {
             match_sequence(&input("bc"), &input("c"), &input("bc"))
         )
     }
+    fn make_ml(common: &[u8], my: &[u8], old: &[u8], your: &[u8]) -> MergeLines<Vec<u8>>  {
+        MergeLines::<Vec<u8>> {
+            common_lines: vsplit(common),
+            my_lines: vsplit(my),
+            old_lines: vsplit(old),
+            your_lines: vsplit(your),
+        }
+    }
     #[test]
-    fn dump_basic(){
-        let common_lines = b"common\n".into();
-        let my_lines = b"my\n".into();
-        let old_lines = b"old\n".into();
-        let your_lines = b"your\n".into();
-        let ml = MergeLines::<&Vec<u8>> {
-            common_lines: vec![&common_lines],
-            my_lines: vec![&my_lines],
-            old_lines: vec![&old_lines],
-            your_lines: vec![&your_lines],
-        };
+    fn dump_conflict_old(){
+        let ml = make_ml(b"common\n", b"my\n", b"old\n", b"your\n");
         let mut result = vec![];
-        ml.dump(&mut result).expect("Succeeds because result is a Vec.");
+        ml.dump(&merge_labels(), MergeOutcome::Conflict, true, &mut result).expect(
+            "Succeeds because result is a Vec.");
         assert_eq!(String::from_utf8_lossy(&result), String::from(indoc!("
             common
-            <<<<<<<
+            <<<<<<< my_label
             my
-            !!!!!!!
+            ||||||| old_label
             old
             =======
             your
-            >>>>>>>
+            >>>>>>> your_label
+        ")));
+    }
+    #[test]
+    fn dump_conflict_no_old(){
+        let ml = make_ml(b"common\n", b"my\n", b"old\n", b"your\n");
+        let mut result = vec![];
+        ml.dump(&merge_labels(), MergeOutcome::Conflict, false, &mut result).expect(
+            "Succeeds because result is a Vec.");
+        assert_eq!(String::from_utf8_lossy(&result), String::from(indoc!("
+            common
+            <<<<<<< my_label
+            my
+            =======
+            your
+            >>>>>>> your_label
+        ")));
+    }
+    #[test]
+    fn dump_my_wins(){
+        let ml = make_ml(b"common\n", b"my\n", b"old\n", b"your\n");
+        let mut result = vec![];
+        ml.dump(&merge_labels(), MergeOutcome::MyWins, true, &mut result).expect("Succeeds because result is a Vec.");
+        assert_eq!(String::from_utf8_lossy(&result), String::from(indoc!("
+            common
+            my
+        ")));
+    }
+    #[test]
+    fn dump_your_wins(){
+        let ml = make_ml(b"common\n", b"my\n", b"old\n", b"your\n");
+        let mut result = vec![];
+        ml.dump(&merge_labels(), MergeOutcome::YourWins, true, &mut result).expect("Succeeds because result is a Vec.");
+        assert_eq!(String::from_utf8_lossy(&result), String::from(indoc!("
+            common
+            your
+        ")));
+    }
+    #[test]
+    fn dump_fluke_agreement(){
+        let ml = make_ml(b"common\n", b"my\n", b"old\n", b"your\n");
+        let mut result = vec![];
+        ml.dump(&merge_labels(), MergeOutcome::FlukeAgreement, true, &mut result).expect("Succeeds because result is a Vec.");
+        assert_eq!(String::from_utf8_lossy(&result), String::from(indoc!("
+            common
+            <<<<<<< old_label
+            old
+            =======
+            your
+            >>>>>>> your_label
+        ")));
+    }
+    #[test]
+    fn dump_fluke_agreement_no_old(){
+        let ml = make_ml(b"common\n", b"my\n", b"old\n", b"your\n");
+        let mut result = vec![];
+        ml.dump(&merge_labels(), MergeOutcome::FlukeAgreement, false, &mut result).expect("Succeeds because result is a Vec.");
+        assert_eq!(String::from_utf8_lossy(&result), String::from(indoc!("
+            common
+            your
+        ")));
+    }
+    #[test]
+    fn calculate_merge(){
+        let ml = make_ml(b"common\n", b"a\n", b"b\n", b"c\n");
+        assert_eq!(ml.calculate_merge(), MergeOutcome::Conflict);
+        let ml = make_ml(b"common\n", b"a\n", b"a\n", b"c\n");
+        assert_eq!(ml.calculate_merge(), MergeOutcome::YourWins);
+        let ml = make_ml(b"common\n", b"a\n", b"b\n", b"b\n");
+        assert_eq!(ml.calculate_merge(), MergeOutcome::MyWins);
+        let ml = make_ml(b"common\n", b"a\n", b"b\n", b"a\n");
+        assert_eq!(ml.calculate_merge(), MergeOutcome::FlukeAgreement);
+        let ml = make_ml(b"common\n", b"a\n", b"a\n", b"a\n");
+        assert_eq!(ml.calculate_merge(), MergeOutcome::YourWins);
+    }
+    fn merge_labels() -> MergeLabels {
+        MergeLabels {
+            mine: "my_label".into(),
+            old: "old_label".into(),
+            theirs: "your_label".into(),
+        }
+    }
+    #[test]
+    fn merge() {
+        let mut result = vec![];
+        let labels = merge_labels();
+        make_ml(b"common\n", b"my\n", b"old\n", b"your\n")
+            .merge(&labels, true, &mut result).expect("Succeeds because result is a Vec.");
+        assert_eq!(String::from_utf8_lossy(&result), String::from(indoc!("
+            common
+            <<<<<<< my_label
+            my
+            ||||||| old_label
+            old
+            =======
+            your
+            >>>>>>> your_label
+        ")));
+        let mut result = vec![];
+        make_ml(b"common\n", b"my\n", b"my\n", b"your\n")
+            .merge(&labels, true, &mut result).expect("Succeeds because result is a Vec.");
+        assert_eq!(String::from_utf8_lossy(&result), String::from(indoc!("
+            common
+            your
+        ")));
+        let mut result = vec![];
+        make_ml(b"common\n", b"my\n", b"your\n", b"your\n")
+            .merge(&labels, true, &mut result).expect("Succeeds because result is a Vec.");
+        assert_eq!(String::from_utf8_lossy(&result), String::from(indoc!("
+            common
+            my
+        ")));
+        let mut result = vec![];
+        make_ml(b"common\n", b"both\n", b"old\n", b"both\n")
+            .merge(&labels, true, &mut result).expect("Succeeds because result is a Vec.");
+        assert_eq!(String::from_utf8_lossy(&result), String::from(indoc!("
+            common
+            <<<<<<< old_label
+            old
+            =======
+            both
+            >>>>>>> your_label
         ")));
     }
 }
