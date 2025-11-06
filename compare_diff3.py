@@ -119,12 +119,14 @@ def _run_diff3_command_executor(paths: FileVersions, is_local: bool) -> str:
     else:
         cmd = ['diff3', '-m']
 
-    full_cmd = cmd + [str(p) for p in paths]
+    full_cmd = cmd + [str(paths.ours.absolute()), str(paths.base.absolute()), str(paths.theirs.absolute())]
 
+    print(f"Running command: {' '.join(full_cmd)}", file=sys.stderr)
     result = subprocess.run(
         full_cmd,
         capture_output=True,
         text=True,
+        cwd="/home/abentley/hacking/diffutils",
     )
     if result.returncode not in [0, 1]:
         print(
