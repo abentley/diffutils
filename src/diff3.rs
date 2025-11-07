@@ -63,24 +63,14 @@ enum MergeOutcome {
 }
 
 #[derive(Debug)]
-struct MergeLines<T: PartialEq> {
-    common_lines: Vec<T>,
+struct LineVariants<T: PartialEq> {
     my_lines: Vec<T>,
     old_lines: Vec<T>,
     your_lines: Vec<T>,
 }
-
-impl<T: PartialEq> MergeLines<T> {
+impl<T: PartialEq> LineVariants<T> {
     fn has_conflict(&self) -> bool {
         self.my_lines != vec![] || self.old_lines != vec![] || self.your_lines != vec![]
-    }
-    fn new() -> Self {
-        Self {
-            common_lines: vec![],
-            my_lines: vec![],
-            old_lines: vec![],
-            your_lines: vec![],
-        }
     }
     fn calculate_merge(&self) -> MergeOutcome {
         use MergeOutcome::*;
@@ -96,7 +86,7 @@ impl<T: PartialEq> MergeLines<T> {
     }
 }
 
-impl<T: AsRef<Vec<u8>> + PartialEq> MergeLines<T> {
+impl<T: AsRef<Vec<u8>> + PartialEq> LineVariants<T> {
     fn dump(
         &self,
         labels: &MergeLabels,
@@ -105,52 +95,78 @@ impl<T: AsRef<Vec<u8>> + PartialEq> MergeLines<T> {
         stdout: &mut impl Write,
     ) -> Result<(), std::io::Error> {
         use MergeOutcome::*;
-        for line in &self.common_lines {
-            stdout.write_all(line.as_ref())?;
-        }
-        if !self.has_conflict() {
-            return Ok(());
-        }
-
         match merge_outcome {
-            Conflict { overlap: true } => {
-                let middle = if include_old {
-                    Some((&self.old_lines, &labels.old))
-                } else {
-                    None
-                };
-                write_conflict(
-                    (&self.my_lines, &labels.mine),
-                    middle,
-                    (&self.your_lines, &labels.yours),
-                    stdout,
-                )?;
-            }
             MyWins => {
                 for line in &self.my_lines {
                     stdout.write_all(line.as_ref())?;
                 }
             }
-            YourWins => {
+            Conflict { overlap } if include_old || overlap => {
+                self.write_conflict(labels, overlap, include_old, stdout)?
+            }
+            YourWins | Conflict { .. } => {
                 for line in &self.your_lines {
                     stdout.write_all(line.as_ref())?;
                 }
             }
-            Conflict { overlap: false } => {
-                if include_old {
-                    write_conflict(
-                        (&self.old_lines, &labels.old),
-                        None,
-                        (&self.your_lines, &labels.yours),
-                        stdout,
-                    )?;
-                } else {
-                    for line in &self.your_lines {
-                        stdout.write_all(line.as_ref())?;
-                    }
-                }
-            }
         };
+        Ok(())
+    }
+    fn write_conflict(
+        &self,
+        labels: &MergeLabels,
+        overlap: bool,
+        include_old: bool,
+        stdout: &mut impl Write,
+    ) -> Result<(), std::io::Error> {
+        let middle = match include_old && overlap {
+            true => Some((&self.old_lines, &labels.old)),
+            false => None,
+        };
+        // For overlap conflicts, the first set of lines is MINE but for other conflicts, it's OLD
+        let first = match overlap {
+            true => (&self.my_lines, &labels.mine),
+            false => (&self.old_lines, &labels.old),
+        };
+        write_conflict(first, middle, (&self.your_lines, &labels.yours), stdout)
+    }
+}
+
+#[derive(Debug)]
+struct MergeLines<T: PartialEq> {
+    common_lines: Vec<T>,
+    variants: LineVariants<T>,
+}
+
+impl<T: PartialEq> MergeLines<T> {
+    fn new() -> Self {
+        Self {
+            common_lines: vec![],
+            variants: LineVariants::<T> {
+                my_lines: vec![],
+                old_lines: vec![],
+                your_lines: vec![],
+            },
+        }
+    }
+}
+
+impl<T: AsRef<Vec<u8>> + PartialEq> MergeLines<T> {
+    fn dump(
+        &self,
+        labels: &MergeLabels,
+        merge_outcome: MergeOutcome,
+        include_old: bool,
+        stdout: &mut impl Write,
+    ) -> Result<(), std::io::Error> {
+        for line in &self.common_lines {
+            stdout.write_all(line.as_ref())?;
+        }
+        if !self.variants.has_conflict() {
+            return Ok(());
+        }
+        self.variants
+            .dump(labels, merge_outcome, include_old, stdout)?;
         Ok(())
     }
     fn merge(
@@ -159,7 +175,7 @@ impl<T: AsRef<Vec<u8>> + PartialEq> MergeLines<T> {
         include_old: bool,
         stdout: &mut impl Write,
     ) -> Result<(), std::io::Error> {
-        self.dump(&labels, self.calculate_merge(), include_old, stdout)
+        self.dump(labels, self.variants.calculate_merge(), include_old, stdout)
     }
 }
 
@@ -199,7 +215,7 @@ fn make_merged<T: PartialEq + Copy>(lines: Vec<Line<T>>) -> Vec<MergeLines<T>> {
     for line in lines {
         let mut cur: Option<&mut MergeLines<T>> = output.last_mut();
         if let Some(ref lcur) = cur {
-            if line.versions == MyOldYour && lcur.has_conflict() {
+            if line.versions == MyOldYour && lcur.variants.has_conflict() {
                 cur = None;
             }
         }
@@ -213,13 +229,13 @@ fn make_merged<T: PartialEq + Copy>(lines: Vec<Line<T>>) -> Vec<MergeLines<T>> {
         } else {
             let (my_b, old_b, your_b) = line.versions.as_tuple();
             if my_b {
-                cur.my_lines.push(line.line)
+                cur.variants.my_lines.push(line.line)
             }
             if old_b {
-                cur.old_lines.push(line.line)
+                cur.variants.old_lines.push(line.line)
             }
             if your_b {
-                cur.your_lines.push(line.line)
+                cur.variants.your_lines.push(line.line)
             }
         }
     }
@@ -363,24 +379,30 @@ struct MergeLabels {
 
 fn load(
     mut opts_iter: impl Iterator<Item = OsString>,
-) -> Result<(MergeLabels, Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>), Error> {
+) -> Result<(MergeLabels, LineVariants<Vec<u8>>), Error> {
     let files = MergeLabels {
         mine: next_file(&mut opts_iter)?,
         old: next_file(&mut opts_iter)?,
         yours: next_file(&mut opts_iter)?,
     };
-    let mine_lines = bsplit(&files.mine)?;
-    let old_lines = bsplit(&files.old)?;
-    let yours_lines = bsplit(&files.yours)?;
-    Ok((files, mine_lines, old_lines, yours_lines))
+    let variants = LineVariants::<Vec<u8>> {
+        my_lines: bsplit(&files.mine)?,
+        old_lines: bsplit(&files.old)?,
+        your_lines: bsplit(&files.yours)?,
+    };
+    Ok((files, variants))
 }
 
 fn real_main(opts: Peekable<ArgsOs>) -> Result<(), Error> {
     let opts: Vec<_> = opts.collect();
     let mut opts_iter = opts.into_iter();
     opts_iter.next();
-    let (files, mine_lines, old_lines, yours_lines) = load(opts_iter)?;
-    let matches = match_sequence(&mine_lines, &old_lines, &yours_lines);
+    let (files, variants) = load(opts_iter)?;
+    let matches = match_sequence(
+        &variants.my_lines,
+        &variants.old_lines,
+        &variants.your_lines,
+    );
     let merged = make_merged(matches);
     for match_ in merged {
         match_.merge(&files, true, &mut std::io::stdout())?
@@ -486,9 +508,11 @@ mod tests {
     fn make_ml(common: &[u8], my: &[u8], old: &[u8], your: &[u8]) -> MergeLines<Vec<u8>> {
         MergeLines::<Vec<u8>> {
             common_lines: split(common),
-            my_lines: split(my),
-            old_lines: split(old),
-            your_lines: split(your),
+            variants: LineVariants::<Vec<u8>> {
+                my_lines: split(my),
+                old_lines: split(old),
+                your_lines: split(your),
+            },
         }
     }
     #[test]
@@ -564,7 +588,7 @@ mod tests {
             .expect("Succeeds because result is a Vec.");
         assert_eq!(
             String::from_utf8_lossy(&result),
-            indoc!{
+            indoc! {
                 "common
                 your
                 "
@@ -584,7 +608,7 @@ mod tests {
         .expect("Succeeds because result is a Vec.");
         assert_eq!(
             String::from_utf8_lossy(&result),
-            indoc!{
+            indoc! {
                 "common
                 <<<<<<< old_label
                 old
@@ -608,7 +632,7 @@ mod tests {
         .expect("Succeeds because result is a Vec.");
         assert_eq!(
             String::from_utf8_lossy(&result),
-            indoc!{
+            indoc! {
                 "common
                 your
                 "
@@ -619,20 +643,20 @@ mod tests {
     fn calculate_merge() {
         let ml = make_ml(b"common\n", b"a\n", b"b\n", b"c\n");
         assert_eq!(
-            ml.calculate_merge(),
+            ml.variants.calculate_merge(),
             MergeOutcome::Conflict { overlap: true }
         );
         let ml = make_ml(b"common\n", b"a\n", b"a\n", b"c\n");
-        assert_eq!(ml.calculate_merge(), MergeOutcome::YourWins);
+        assert_eq!(ml.variants.calculate_merge(), MergeOutcome::YourWins);
         let ml = make_ml(b"common\n", b"a\n", b"b\n", b"b\n");
-        assert_eq!(ml.calculate_merge(), MergeOutcome::MyWins);
+        assert_eq!(ml.variants.calculate_merge(), MergeOutcome::MyWins);
         let ml = make_ml(b"common\n", b"a\n", b"b\n", b"a\n");
         assert_eq!(
-            ml.calculate_merge(),
+            ml.variants.calculate_merge(),
             MergeOutcome::Conflict { overlap: false }
         );
         let ml = make_ml(b"common\n", b"a\n", b"a\n", b"a\n");
-        assert_eq!(ml.calculate_merge(), MergeOutcome::YourWins);
+        assert_eq!(ml.variants.calculate_merge(), MergeOutcome::YourWins);
     }
     fn merge_labels() -> MergeLabels {
         MergeLabels {
