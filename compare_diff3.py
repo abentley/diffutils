@@ -115,9 +115,9 @@ def _write_version_files(output_dir: Path, file_versions: FileVersions) -> FileV
 def _run_diff3_command_executor(paths: FileVersions, is_local: bool) -> str:
     cmd = []
     if is_local:
-        cmd = ['cargo', 'run', '--', 'diff3']
+        cmd = ['cargo', 'run', '--', 'diff3', '-E']
     else:
-        cmd = ['diff3', '-m']
+        cmd = ['diff3', '-m', '-E']
 
     full_cmd = cmd + [str(paths.ours.absolute()), str(paths.base.absolute()), str(paths.theirs.absolute())]
 

@@ -169,14 +169,6 @@ impl<T: AsRef<Vec<u8>> + PartialEq> MergeLines<T> {
             .dump(labels, merge_outcome, include_old, stdout)?;
         Ok(())
     }
-    fn merge(
-        &self,
-        labels: &MergeLabels,
-        include_old: bool,
-        stdout: &mut impl Write,
-    ) -> Result<(), std::io::Error> {
-        self.dump(labels, self.variants.calculate_merge(), include_old, stdout)
-    }
 }
 
 fn write_conflict<T: AsRef<Vec<u8>>>(
@@ -379,33 +371,54 @@ struct MergeLabels {
 
 fn load(
     mut opts_iter: impl Iterator<Item = OsString>,
-) -> Result<(MergeLabels, LineVariants<Vec<u8>>), Error> {
+) -> Result<(MergeLabels, LineVariants<Vec<u8>>, bool), Error> {
+    let mut show_overlap = false;
+    let mut file_list = vec![];
+    while file_list.len() < 3 {
+        let arg = next_file(&mut opts_iter)?;
+        match arg.as_bytes() {
+            b"-E" | b"--show-overlap" => {
+                show_overlap = true;
+            }
+            _ => {file_list.push(arg)}
+        }
+    }
     let files = MergeLabels {
-        mine: next_file(&mut opts_iter)?,
-        old: next_file(&mut opts_iter)?,
-        yours: next_file(&mut opts_iter)?,
+        mine: file_list[0].clone(),
+        old: file_list[1].clone(),
+        yours: file_list[2].clone(),
     };
     let variants = LineVariants::<Vec<u8>> {
         my_lines: bsplit(&files.mine)?,
         old_lines: bsplit(&files.old)?,
         your_lines: bsplit(&files.yours)?,
     };
-    Ok((files, variants))
+    Ok((files, variants, show_overlap))
 }
 
 fn real_main(opts: Peekable<ArgsOs>) -> Result<(), Error> {
     let opts: Vec<_> = opts.collect();
     let mut opts_iter = opts.into_iter();
     opts_iter.next();
-    let (files, variants) = load(opts_iter)?;
+    let (files, variants, merge_overlap) = load(opts_iter)?;
     let matches = match_sequence(
         &variants.my_lines,
         &variants.old_lines,
         &variants.your_lines,
     );
     let merged = make_merged(matches);
+    write_merge(merged, &files, !merge_overlap, &mut std::io::stdout())?;
+    Ok(())
+}
+
+fn write_merge(
+    merged: Vec<MergeLines<&Vec<u8>>>,
+    labels: &MergeLabels,
+    include_old: bool,
+    stdout: &mut impl Write,
+) -> Result<(), std::io::Error> {
     for match_ in merged {
-        match_.merge(&files, true, &mut std::io::stdout())?
+        match_.dump(labels, match_.variants.calculate_merge(), include_old, stdout)?;
     }
     Ok(())
 }
@@ -664,67 +677,5 @@ mod tests {
             old: "old_label".into(),
             yours: "your_label".into(),
         }
-    }
-    #[test]
-    fn merge() {
-        let mut result = vec![];
-        let labels = merge_labels();
-        make_ml(b"common\n", b"my\n", b"old\n", b"your\n")
-            .merge(&labels, true, &mut result)
-            .expect("Succeeds because result is a Vec.");
-        assert_eq!(
-            String::from_utf8_lossy(&result),
-            indoc! {
-                "common
-                <<<<<<< my_label
-                my
-                ||||||| old_label
-                old
-                =======
-                your
-                >>>>>>> your_label
-                "
-            }
-        );
-        let mut result = vec![];
-        make_ml(b"common\n", b"my\n", b"my\n", b"your\n")
-            .merge(&labels, true, &mut result)
-            .expect("Succeeds because result is a Vec.");
-        assert_eq!(
-            String::from_utf8_lossy(&result),
-            indoc! {
-                "common
-                your
-                "
-            }
-        );
-        let mut result = vec![];
-        make_ml(b"common\n", b"my\n", b"your\n", b"your\n")
-            .merge(&labels, true, &mut result)
-            .expect("Succeeds because result is a Vec.");
-        assert_eq!(
-            String::from_utf8_lossy(&result),
-            indoc! {
-                "common
-                my
-                "
-            }
-        );
-        let mut result = vec![];
-        make_ml(b"common\n", b"both\n", b"old\n", b"both\n")
-            .merge(&labels, true, &mut result)
-            .expect("Succeeds because result is a Vec.");
-        assert_eq!(
-            String::from_utf8_lossy(&result),
-            indoc! {
-                "common
-                <<<<<<< old_label
-                old
-                =======
-                both
-                >>>>>>> your_label
-                "
-            }
-        );
     }
 }
