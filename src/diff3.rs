@@ -343,17 +343,16 @@ fn next_file<T: Iterator<Item = OsString>>(opts_iter: &mut T) -> Result<OsString
     Ok(x)
 }
 
-fn split<'a>(contents: &'a [u8]) -> impl Iterator<Item = &'a [u8]> {
-    contents.split_inclusive(|x| *x == b'\n')
-}
-
-fn vsplit(contents: &[u8]) -> Vec<Vec<u8>> {
-    split(&contents).map(|x| x.to_owned()).collect()
+fn split(contents: &[u8]) -> Vec<Vec<u8>> {
+    contents
+        .split_inclusive(|x| *x == b'\n')
+        .map(|x| x.to_owned())
+        .collect()
 }
 
 fn bsplit(filename: &OsString) -> Result<Vec<Vec<u8>>, Error> {
     let contents = fs::read(filename)?;
-    Ok(vsplit(&contents))
+    Ok(split(&contents))
 }
 
 struct MergeLabels {
@@ -486,10 +485,10 @@ mod tests {
     }
     fn make_ml(common: &[u8], my: &[u8], old: &[u8], your: &[u8]) -> MergeLines<Vec<u8>> {
         MergeLines::<Vec<u8>> {
-            common_lines: vsplit(common),
-            my_lines: vsplit(my),
-            old_lines: vsplit(old),
-            your_lines: vsplit(your),
+            common_lines: split(common),
+            my_lines: split(my),
+            old_lines: split(old),
+            your_lines: split(your),
         }
     }
     #[test]
@@ -505,18 +504,17 @@ mod tests {
         .expect("Succeeds because result is a Vec.");
         assert_eq!(
             String::from_utf8_lossy(&result),
-            String::from(indoc!(
+            indoc! {
+                "common
+                <<<<<<< my_label
+                my
+                ||||||| old_label
+                old
+                =======
+                your
+                >>>>>>> your_label
                 "
-            common
-            <<<<<<< my_label
-            my
-            ||||||| old_label
-            old
-            =======
-            your
-            >>>>>>> your_label
-        "
-            ))
+            }
         );
     }
     #[test]
@@ -532,16 +530,15 @@ mod tests {
         .expect("Succeeds because result is a Vec.");
         assert_eq!(
             String::from_utf8_lossy(&result),
-            String::from(indoc!(
+            indoc! {
+                "common
+                <<<<<<< my_label
+                my
+                =======
+                your
+                >>>>>>> your_label
                 "
-            common
-            <<<<<<< my_label
-            my
-            =======
-            your
-            >>>>>>> your_label
-        "
-            ))
+            }
         );
     }
     #[test]
@@ -552,12 +549,11 @@ mod tests {
             .expect("Succeeds because result is a Vec.");
         assert_eq!(
             String::from_utf8_lossy(&result),
-            String::from(indoc!(
+            indoc! {
+                "common
+                my
                 "
-            common
-            my
-        "
-            ))
+            }
         );
     }
     #[test]
@@ -568,12 +564,11 @@ mod tests {
             .expect("Succeeds because result is a Vec.");
         assert_eq!(
             String::from_utf8_lossy(&result),
-            String::from(indoc!(
+            indoc!{
+                "common
+                your
                 "
-            common
-            your
-        "
-            ))
+            }
         );
     }
     #[test]
@@ -589,16 +584,15 @@ mod tests {
         .expect("Succeeds because result is a Vec.");
         assert_eq!(
             String::from_utf8_lossy(&result),
-            String::from(indoc!(
+            indoc!{
+                "common
+                <<<<<<< old_label
+                old
+                =======
+                your
+                >>>>>>> your_label
                 "
-            common
-            <<<<<<< old_label
-            old
-            =======
-            your
-            >>>>>>> your_label
-        "
-            ))
+            }
         );
     }
     #[test]
@@ -614,12 +608,11 @@ mod tests {
         .expect("Succeeds because result is a Vec.");
         assert_eq!(
             String::from_utf8_lossy(&result),
-            String::from(indoc!(
+            indoc!{
+                "common
+                your
                 "
-            common
-            your
-        "
-            ))
+            }
         );
     }
     #[test]
@@ -657,18 +650,17 @@ mod tests {
             .expect("Succeeds because result is a Vec.");
         assert_eq!(
             String::from_utf8_lossy(&result),
-            String::from(indoc!(
+            indoc! {
+                "common
+                <<<<<<< my_label
+                my
+                ||||||| old_label
+                old
+                =======
+                your
+                >>>>>>> your_label
                 "
-            common
-            <<<<<<< my_label
-            my
-            ||||||| old_label
-            old
-            =======
-            your
-            >>>>>>> your_label
-        "
-            ))
+            }
         );
         let mut result = vec![];
         make_ml(b"common\n", b"my\n", b"my\n", b"your\n")
@@ -676,12 +668,11 @@ mod tests {
             .expect("Succeeds because result is a Vec.");
         assert_eq!(
             String::from_utf8_lossy(&result),
-            String::from(indoc!(
+            indoc! {
+                "common
+                your
                 "
-            common
-            your
-        "
-            ))
+            }
         );
         let mut result = vec![];
         make_ml(b"common\n", b"my\n", b"your\n", b"your\n")
@@ -689,12 +680,11 @@ mod tests {
             .expect("Succeeds because result is a Vec.");
         assert_eq!(
             String::from_utf8_lossy(&result),
-            String::from(indoc!(
+            indoc! {
+                "common
+                my
                 "
-            common
-            my
-        "
-            ))
+            }
         );
         let mut result = vec![];
         make_ml(b"common\n", b"both\n", b"old\n", b"both\n")
@@ -702,16 +692,15 @@ mod tests {
             .expect("Succeeds because result is a Vec.");
         assert_eq!(
             String::from_utf8_lossy(&result),
-            String::from(indoc!(
+            indoc! {
+                "common
+                <<<<<<< old_label
+                old
+                =======
+                both
+                >>>>>>> your_label
                 "
-            common
-            <<<<<<< old_label
-            old
-            =======
-            both
-            >>>>>>> your_label
-        "
-            ))
+            }
         );
     }
 }
