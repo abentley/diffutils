@@ -51,15 +51,15 @@ impl Display for Line<&Vec<u8>> {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum MergeOutcome {
     MyWins,
     YourWins,
     /// A Conflict is either when all sides disagree (an overlap conflict) or when old disagrees
     /// with the other two.
-    Conflict {
-        overlap: bool,
-    },
+    ConflictOldYours,
+    ConflictAll,
+    ConflictMineYours,
 }
 
 #[derive(Debug)]
@@ -72,16 +72,16 @@ impl<T: PartialEq> LineVariants<T> {
     fn has_conflict(&self) -> bool {
         self.my_lines != vec![] || self.old_lines != vec![] || self.your_lines != vec![]
     }
-    fn calculate_merge(&self) -> MergeOutcome {
+    fn calculate_merge(&self, concrete: ConcreteResolution) -> MergeOutcome {
         use MergeOutcome::*;
         if self.my_lines == self.old_lines {
-            YourWins
+            concrete.only_your
         } else if self.your_lines == self.old_lines {
             MyWins
         } else if self.your_lines == self.my_lines {
-            Conflict { overlap: false }
+            concrete.conflict
         } else {
-            Conflict { overlap: true }
+            concrete.overlap
         }
     }
 }
@@ -91,7 +91,6 @@ impl<T: AsRef<Vec<u8>> + PartialEq> LineVariants<T> {
         &self,
         labels: &MergeLabels,
         merge_outcome: MergeOutcome,
-        include_old: bool,
         stdout: &mut impl Write,
     ) -> Result<(), std::io::Error> {
         use MergeOutcome::*;
@@ -101,10 +100,25 @@ impl<T: AsRef<Vec<u8>> + PartialEq> LineVariants<T> {
                     stdout.write_all(line.as_ref())?;
                 }
             }
-            Conflict { overlap } if include_old || overlap => {
-                self.write_conflict(labels, overlap, include_old, stdout)?
-            }
-            YourWins | Conflict { .. } => {
+            ConflictOldYours =>write_conflict(
+                (&self.old_lines, &labels.old),
+                None,
+                (&self.your_lines, &labels.yours),
+                stdout,
+            )?,
+            ConflictMineYours => write_conflict(
+                (&self.my_lines, &labels.mine),
+                None,
+                (&self.your_lines, &labels.yours),
+                stdout,
+            )?,
+            ConflictAll => write_conflict(
+                (&self.my_lines, &labels.mine),
+                Some((&self.old_lines, &labels.old)),
+                (&self.your_lines, &labels.yours),
+                stdout,
+            )?,
+            YourWins => {
                 for line in &self.your_lines {
                     stdout.write_all(line.as_ref())?;
                 }
@@ -156,7 +170,6 @@ impl<T: AsRef<Vec<u8>> + PartialEq> MergeLines<T> {
         &self,
         labels: &MergeLabels,
         merge_outcome: MergeOutcome,
-        include_old: bool,
         stdout: &mut impl Write,
     ) -> Result<(), std::io::Error> {
         for line in &self.common_lines {
@@ -165,8 +178,7 @@ impl<T: AsRef<Vec<u8>> + PartialEq> MergeLines<T> {
         if !self.variants.has_conflict() {
             return Ok(());
         }
-        self.variants
-            .dump(labels, merge_outcome, include_old, stdout)?;
+        self.variants.dump(labels, merge_outcome, stdout)?;
         Ok(())
     }
 }
@@ -369,20 +381,135 @@ struct MergeLabels {
     yours: OsString,
 }
 
+#[derive(Copy, Clone)]
+enum Resolution {
+    PickNonOverlap,              // -3, incorporate non-overlap conflicts
+    BracketOverlap,              // -E, incorporate conflicts, but bracket overlaps
+    PickYour,    // -e, incorporate all changes from your, including overlapped changes.
+    PickOverlap, // -x
+    PickOverlapBracketConflicts, // -X
+    BracketAll,  // -A, incorporate changes from your, but bracket all conflicts
+}
+
+#[derive(Copy, Clone)]
+struct ConcreteResolution {
+    only_your: MergeOutcome,
+    conflict: MergeOutcome,
+    overlap: MergeOutcome,
+}
+
+impl From<Resolution> for ConcreteResolution {
+    fn from(resolution: Resolution) -> ConcreteResolution {
+        use MergeOutcome::*;
+        use Resolution::*;
+        let only_your = match resolution {
+            PickOverlap | PickOverlapBracketConflicts => MyWins,
+            _ => YourWins,
+        };
+        let conflict = match resolution {
+            PickOverlap => MyWins,
+            BracketOverlap | PickNonOverlap | PickYour | PickOverlapBracketConflicts => YourWins,
+            BracketAll => ConflictOldYours,
+        };
+        let overlap = match resolution {
+            PickNonOverlap => MyWins,
+            PickOverlap | PickOverlapBracketConflicts | PickYour => YourWins,
+            BracketOverlap => ConflictMineYours,
+            BracketAll => ConflictAll,
+        };
+        ConcreteResolution {
+            only_your,
+            conflict,
+            overlap,
+        }
+    }
+}
+
+enum Operation {
+    Normal,
+    Ed(Resolution),
+    Merge(Resolution),
+}
+
+fn operation(resolution: Resolution, merge: bool) -> Operation {
+    if merge {
+        Operation::Merge(resolution)
+    } else {
+        Operation::Ed(resolution)
+    }
+}
+
 fn load(
     mut opts_iter: impl Iterator<Item = OsString>,
-) -> Result<(MergeLabels, LineVariants<Vec<u8>>, bool), Error> {
+) -> Result<(MergeLabels, LineVariants<Vec<u8>>, Operation), Error> {
     let mut show_overlap = false;
+    let mut ed = false;
+    let mut merge = false;
+    let mut show_all = false;
+    let mut overlap_only = false;
+    let mut overlap_only_bracket = false;
+    let mut easy_only = false;
     let mut file_list = vec![];
     while file_list.len() < 3 {
         let arg = next_file(&mut opts_iter)?;
         match arg.as_bytes() {
+            b"-A" | b"--show-all" => {
+                show_all = true;
+            }
+            b"-e" | b"--ed" => {
+                ed = true;
+            }
             b"-E" | b"--show-overlap" => {
                 show_overlap = true;
             }
-            _ => {file_list.push(arg)}
+            b"-m" | b"--merge" => {
+                merge = true;
+            }
+            b"-3" | b"--easy-only" => {
+                easy_only = true;
+            }
+            b"-x" | b"--overlap-only" => {
+                overlap_only = true;
+            }
+            b"-X" => {
+                overlap_only_bracket = true;
+            }
+            _ => file_list.push(arg),
         }
     }
+    let operation = match (
+        ed,
+        show_all,
+        show_overlap,
+        overlap_only,
+        overlap_only_bracket,
+        easy_only,
+        merge,
+    ) {
+        (false, false, false, false, false, false, false) => Operation::Normal,
+        (false, false, false, false, false, false, true) => {
+            Operation::Merge(Resolution::BracketAll)
+        }
+        (true, false, false, false, false, false, merge) => operation(Resolution::PickYour, merge),
+        (false, true, false, false, false, false, merge) => {
+            operation(Resolution::BracketAll, merge)
+        }
+        (false, false, true, false, false, false, merge) => {
+            operation(Resolution::BracketOverlap, merge)
+        }
+        (false, false, false, true, false, false, merge) => {
+            operation(Resolution::PickOverlap, merge)
+        }
+        (false, false, false, false, true, false, merge) => {
+            operation(Resolution::PickOverlapBracketConflicts, merge)
+        }
+        (false, false, false, false, false, true, merge) => {
+            operation(Resolution::PickNonOverlap, merge)
+        }
+        x => {
+            panic!("incompatible options: {x:?}")
+        }
+    };
     let files = MergeLabels {
         mine: file_list[0].clone(),
         old: file_list[1].clone(),
@@ -393,32 +520,40 @@ fn load(
         old_lines: bsplit(&files.old)?,
         your_lines: bsplit(&files.yours)?,
     };
-    Ok((files, variants, show_overlap))
+    Ok((files, variants, operation))
 }
 
 fn real_main(opts: Peekable<ArgsOs>) -> Result<(), Error> {
     let opts: Vec<_> = opts.collect();
     let mut opts_iter = opts.into_iter();
     opts_iter.next();
-    let (files, variants, merge_overlap) = load(opts_iter)?;
+    let (files, variants, operation) = load(opts_iter)?;
     let matches = match_sequence(
         &variants.my_lines,
         &variants.old_lines,
         &variants.your_lines,
     );
     let merged = make_merged(matches);
-    write_merge(merged, &files, !merge_overlap, &mut std::io::stdout())?;
+    match operation {
+        Operation::Merge(resolution) => {
+            write_merge(merged, &files, resolution, &mut std::io::stdout())?;
+        }
+        Operation::Normal | Operation::Ed(_) => {
+            todo!()
+        }
+    }
     Ok(())
 }
 
 fn write_merge(
     merged: Vec<MergeLines<&Vec<u8>>>,
     labels: &MergeLabels,
-    include_old: bool,
+    resolution: Resolution,
     stdout: &mut impl Write,
 ) -> Result<(), std::io::Error> {
+    let concrete = resolution.into();
     for match_ in merged {
-        match_.dump(labels, match_.variants.calculate_merge(), include_old, stdout)?;
+        match_.dump(labels, match_.variants.calculate_merge(concrete), stdout)?;
     }
     Ok(())
 }
@@ -532,13 +667,8 @@ mod tests {
     fn dump_conflict_old() {
         let ml = make_ml(b"common\n", b"my\n", b"old\n", b"your\n");
         let mut result = vec![];
-        ml.dump(
-            &merge_labels(),
-            MergeOutcome::Conflict { overlap: true },
-            true,
-            &mut result,
-        )
-        .expect("Succeeds because result is a Vec.");
+        ml.dump(&merge_labels(), MergeOutcome::ConflictAll, &mut result)
+            .expect("Succeeds because result is a Vec.");
         assert_eq!(
             String::from_utf8_lossy(&result),
             indoc! {
@@ -560,8 +690,7 @@ mod tests {
         let mut result = vec![];
         ml.dump(
             &merge_labels(),
-            MergeOutcome::Conflict { overlap: true },
-            false,
+            MergeOutcome::ConflictMineYours,
             &mut result,
         )
         .expect("Succeeds because result is a Vec.");
@@ -582,7 +711,7 @@ mod tests {
     fn dump_my_wins() {
         let ml = make_ml(b"common\n", b"my\n", b"old\n", b"your\n");
         let mut result = vec![];
-        ml.dump(&merge_labels(), MergeOutcome::MyWins, true, &mut result)
+        ml.dump(&merge_labels(), MergeOutcome::MyWins, &mut result)
             .expect("Succeeds because result is a Vec.");
         assert_eq!(
             String::from_utf8_lossy(&result),
@@ -597,7 +726,7 @@ mod tests {
     fn dump_your_wins() {
         let ml = make_ml(b"common\n", b"my\n", b"old\n", b"your\n");
         let mut result = vec![];
-        ml.dump(&merge_labels(), MergeOutcome::YourWins, true, &mut result)
+        ml.dump(&merge_labels(), MergeOutcome::YourWins, &mut result)
             .expect("Succeeds because result is a Vec.");
         assert_eq!(
             String::from_utf8_lossy(&result),
@@ -612,13 +741,8 @@ mod tests {
     fn dump_fluke_agreement() {
         let ml = make_ml(b"common\n", b"my\n", b"old\n", b"your\n");
         let mut result = vec![];
-        ml.dump(
-            &merge_labels(),
-            MergeOutcome::Conflict { overlap: false },
-            true,
-            &mut result,
-        )
-        .expect("Succeeds because result is a Vec.");
+        ml.dump(&merge_labels(), MergeOutcome::ConflictOldYours, &mut result)
+            .expect("Succeeds because result is a Vec.");
         assert_eq!(
             String::from_utf8_lossy(&result),
             indoc! {
@@ -636,18 +760,17 @@ mod tests {
     fn dump_fluke_agreement_no_old() {
         let ml = make_ml(b"common\n", b"my\n", b"old\n", b"your\n");
         let mut result = vec![];
-        ml.dump(
-            &merge_labels(),
-            MergeOutcome::Conflict { overlap: false },
-            false,
-            &mut result,
-        )
-        .expect("Succeeds because result is a Vec.");
+        ml.dump(&merge_labels(), MergeOutcome::ConflictOldYours, &mut result)
+            .expect("Succeeds because result is a Vec.");
         assert_eq!(
             String::from_utf8_lossy(&result),
             indoc! {
                 "common
+                <<<<<<< old_label
+                old
+                =======
                 your
+                >>>>>>> your_label
                 "
             }
         );
@@ -656,20 +779,29 @@ mod tests {
     fn calculate_merge() {
         let ml = make_ml(b"common\n", b"a\n", b"b\n", b"c\n");
         assert_eq!(
-            ml.variants.calculate_merge(),
-            MergeOutcome::Conflict { overlap: true }
+            ml.variants.calculate_merge(Resolution::BracketAll.into()),
+            MergeOutcome::ConflictAll
         );
         let ml = make_ml(b"common\n", b"a\n", b"a\n", b"c\n");
-        assert_eq!(ml.variants.calculate_merge(), MergeOutcome::YourWins);
+        assert_eq!(
+            ml.variants.calculate_merge(Resolution::BracketAll.into()),
+            MergeOutcome::YourWins
+        );
         let ml = make_ml(b"common\n", b"a\n", b"b\n", b"b\n");
-        assert_eq!(ml.variants.calculate_merge(), MergeOutcome::MyWins);
+        assert_eq!(
+            ml.variants.calculate_merge(Resolution::BracketAll.into()),
+            MergeOutcome::MyWins
+        );
         let ml = make_ml(b"common\n", b"a\n", b"b\n", b"a\n");
         assert_eq!(
-            ml.variants.calculate_merge(),
-            MergeOutcome::Conflict { overlap: false }
+            ml.variants.calculate_merge(Resolution::BracketAll.into()),
+            MergeOutcome::ConflictOldYours
         );
         let ml = make_ml(b"common\n", b"a\n", b"a\n", b"a\n");
-        assert_eq!(ml.variants.calculate_merge(), MergeOutcome::YourWins);
+        assert_eq!(
+            ml.variants.calculate_merge(Resolution::BracketAll.into()),
+            MergeOutcome::YourWins
+        );
     }
     fn merge_labels() -> MergeLabels {
         MergeLabels {
