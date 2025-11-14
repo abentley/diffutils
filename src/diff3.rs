@@ -100,7 +100,7 @@ impl<T: AsRef<Vec<u8>> + PartialEq> LineVariants<T> {
                     stdout.write_all(line.as_ref())?;
                 }
             }
-            ConflictOldYours =>write_conflict(
+            ConflictOldYours => write_conflict(
                 (&self.old_lines, &labels.old),
                 None,
                 (&self.your_lines, &labels.yours),
@@ -125,24 +125,6 @@ impl<T: AsRef<Vec<u8>> + PartialEq> LineVariants<T> {
             }
         };
         Ok(())
-    }
-    fn write_conflict(
-        &self,
-        labels: &MergeLabels,
-        overlap: bool,
-        include_old: bool,
-        stdout: &mut impl Write,
-    ) -> Result<(), std::io::Error> {
-        let middle = match include_old && overlap {
-            true => Some((&self.old_lines, &labels.old)),
-            false => None,
-        };
-        // For overlap conflicts, the first set of lines is MINE but for other conflicts, it's OLD
-        let first = match overlap {
-            true => (&self.my_lines, &labels.mine),
-            false => (&self.old_lines, &labels.old),
-        };
-        write_conflict(first, middle, (&self.your_lines, &labels.yours), stdout)
     }
 }
 
