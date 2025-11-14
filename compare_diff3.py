@@ -10,18 +10,18 @@ from typing import Any, Iterable
 
 @dataclass
 class FileVersions:
-    ours: Any
-    base: Any
-    theirs: Any
+    myfile: Any
+    oldfile: Any
+    yourfile: Any
 
     @classmethod
     def from_iterable(cls, iterable: Iterable) -> "FileVersions":
         return cls(*iterable)
 
     def __iter__(self):
-        yield self.ours
-        yield self.base
-        yield self.theirs
+        yield self.myfile
+        yield self.oldfile
+        yield self.yourfile
 
 
 class GitStrategy:
@@ -89,7 +89,7 @@ def get_file_versions(strategy, commit, filename) -> FileVersions | None:
     parent1 = f"{commit}^1"
     parent2 = f"{commit}^2"
 
-    refs = (parent1, merge_base, parent2)  # ours, base, theirs
+    refs = (parent1, merge_base, parent2)  # myfile, oldfile, yourfile
     versions_iterable = (strategy._get_file_version(ref, filename)
                          for ref in refs)
     versions = FileVersions.from_iterable(versions_iterable)
@@ -103,23 +103,23 @@ def _write_version_files(output_dir: Path, file_versions: FileVersions) -> FileV
     """Writes the version files to the output directory and returns their paths."""
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = FileVersions(
-        ours=output_dir / 'ours.txt',
-        base=output_dir / 'base.txt',
-        theirs=output_dir / 'theirs.txt',
+        myfile=output_dir / 'myfile.txt',
+        oldfile=output_dir / 'oldfile.txt',
+        yourfile=output_dir / 'yourfile.txt',
     )
     for path, content in zip(paths, file_versions):
         path.write_text(content)
     return paths
 
 
-def _run_diff3_command_executor(paths: FileVersions, is_local: bool) -> str:
+def _run_diff3_command_executor(paths: FileVersions, is_local: bool, diff3_options: list[str]) -> str:
     cmd = []
     if is_local:
-        cmd = ['cargo', 'run', '--', 'diff3', '-E']
+        cmd = ['cargo', 'run', '--', 'diff3'] + diff3_options
     else:
-        cmd = ['diff3', '-m', '-E']
+        cmd = ['diff3'] + diff3_options
 
-    full_cmd = cmd + [str(paths.ours.absolute()), str(paths.base.absolute()), str(paths.theirs.absolute())]
+    full_cmd = cmd + [str(paths.myfile.absolute()), str(paths.oldfile.absolute()), str(paths.yourfile.absolute())]
 
     print(f"Running command: {' '.join(full_cmd)}", file=sys.stderr)
     result = subprocess.run(
@@ -135,19 +135,18 @@ def _run_diff3_command_executor(paths: FileVersions, is_local: bool) -> str:
     return result.stdout.strip()
 
 
-def _run_diff3_commands(paths: FileVersions, executor) -> tuple[str, str]:
+def _run_diff3_commands(paths: FileVersions, diff3_options: list[str]) -> tuple[str, str]:
     """Runs the local and system diff3 commands."""
-    local_diff3 = executor(paths, is_local=True)
-    system_diff3 = executor(paths, is_local=False)
+    local_diff3 = _run_diff3_command_executor(paths, is_local=True, diff3_options=diff3_options)
+    system_diff3 = _run_diff3_command_executor(paths, is_local=False, diff3_options=diff3_options)
 
     return local_diff3, system_diff3
 
 
-def run_diff3(file_versions: FileVersions, output_dir: Path) -> tuple[FileVersions, str, str]:
+def run_diff3(file_versions: FileVersions, output_dir: Path, diff3_options: list[str]) -> tuple[FileVersions, str, str]:
     """Runs diff3 on the three file versions and returns paths and results."""
     paths = _write_version_files(output_dir, file_versions)
-    local_diff3, system_diff3 = _run_diff3_commands(
-        paths, executor=_run_diff3_command_executor)
+    local_diff3, system_diff3 = _run_diff3_commands(paths, diff3_options)
     return paths, local_diff3, system_diff3
 
 
@@ -165,14 +164,14 @@ def _get_and_filter_file_versions(strategy, commit, filename):
         )
         return None
 
-    if (file_versions.ours == file_versions.base and
-            file_versions.theirs == file_versions.base):
+    if (file_versions.myfile == file_versions.oldfile and
+            file_versions.yourfile == file_versions.oldfile):
         print(f'      Skipping {filename}: All three versions are ' 'identical.',
               file=sys.stderr)
         return None
 
-    if file_versions.ours == file_versions.theirs:
-        print(f'      Skipping {filename}: Ours and Theirs versions ' 'are identical.',
+    if file_versions.myfile == file_versions.yourfile:
+        print(f'      Skipping {filename}: Myfile and Yourfile versions ' 'are identical.',
               file=sys.stderr)
         return None
     return file_versions
@@ -200,13 +199,14 @@ def _iter_conflicted_files(strategy):
 
 def main():
     """Main function."""
+    diff3_options = sys.argv[1:]
     comparison_count = 0
     for commit, filename, file_versions in _iter_conflicted_files(GitStrategy):
         print(
             f'      Performing diff3 comparison for {filename}...', file=sys.stderr)
         output_dir = (Path('diff_outputs') /
                       f"{filename.replace('/', '_')}_{commit}")
-        paths, local_diff3, system_diff3 = run_diff3(file_versions, output_dir)
+        paths, local_diff3, system_diff3 = run_diff3(file_versions, output_dir, diff3_options)
 
         if local_diff3 == system_diff3:
             for path in paths:
