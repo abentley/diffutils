@@ -183,62 +183,6 @@ impl<T: AsRef<Vec<u8>> + PartialEq> MergeLines<T> {
         self.variants.dump(labels, merge_outcome, stdout)?;
         Ok(())
     }
-    /// Write a "normal output" hunk header
-    fn write_header(
-        &self,
-        i: usize,
-        line_count: usize,
-        n: usize,
-        output: &mut impl Write,
-    ) -> Result<(), std::io::Error> {
-        match line_count {
-            0 => {
-                writeln!(output, "{i}:{n}a")?;
-            }
-            1 => {
-                writeln!(output, "{}:{}c", i, n + 1)?;
-            }
-            x => {
-                writeln!(output, "{}:{},{}c", i, n + 1, n + x)?;
-            }
-        }
-        Ok(())
-    }
-    /// Write the "normal" output format (diff3 default).
-    fn write_normal(
-        &self,
-        my_line_n: usize,
-        old_line_n: usize,
-        your_line_n: usize,
-        output: &mut impl Write,
-    ) -> Result<(), std::io::Error> {
-        if !self.variants.has_conflict() {
-            return Ok(());
-        }
-        let changes = self.variants.infer_changes();
-        match changes {
-            Changed::Mine => {
-                output.write_all(b"====1\n")?;
-            }
-            Changed::Your => {
-                output.write_all(b"====3\n")?;
-            }
-            Changed::YourMine | Changed::YourMineSame => {
-                output.write_all(b"====\n")?;
-            }
-        }
-        self.write_header(1, self.variants.my_lines.len(), my_line_n, output)?;
-        if !matches!(changes, Changed::Your) {
-            write_lines(&self.variants.my_lines, b"  ", output)?;
-        }
-        self.write_header(2, self.variants.old_lines.len(), old_line_n, output)?;
-        if !matches!(changes, Changed::Mine) {
-            write_lines(&self.variants.old_lines, b"  ", output)?;
-        }
-        self.write_header(3, self.variants.your_lines.len(), your_line_n, output)?;
-        write_lines(&self.variants.your_lines, b"  ", output)?;
-        Ok(())
-    }
 }
 
 /// Write a series of lines with a prefix.
@@ -605,7 +549,14 @@ fn real_main(opts: Peekable<ArgsOs>) -> Result<(), Error> {
             write_merge(merged, &files, resolution, &mut stdout)?;
         }
         Operation::Normal => {
-            write_normal(merged, &mut stdout)?;
+            NormalWriter {
+                merged: &merged,
+                output: &mut stdout,
+                my_line_n: 0,
+                old_line_n: 0,
+                your_line_n: 0,
+            }
+            .write_normal()?;
         }
         Operation::Ed(_) => {
             todo!()
@@ -627,24 +578,80 @@ fn write_merge(
     Ok(())
 }
 
-/// Write the normal, default diff3 output format.
-fn write_normal(
-    merged: Vec<MergeLines<&Vec<u8>>>,
-    output: &mut impl Write,
-) -> Result<(), std::io::Error> {
-    let mut my_line_n = 0;
-    let mut old_line_n = 0;
-    let mut your_line_n = 0;
-    for match_ in merged {
-        my_line_n += match_.common_lines.len();
-        old_line_n += match_.common_lines.len();
-        your_line_n += match_.common_lines.len();
-        match_.write_normal(my_line_n, old_line_n, your_line_n, output)?;
-        my_line_n += match_.variants.my_lines.len();
-        old_line_n += match_.variants.old_lines.len();
-        your_line_n += match_.variants.your_lines.len();
+struct NormalWriter<'a, T: Write> {
+    merged: &'a Vec<MergeLines<&'a Vec<u8>>>,
+    output: T,
+    my_line_n: usize,
+    old_line_n: usize,
+    your_line_n: usize,
+}
+
+impl<T: Write> NormalWriter<'_, T> {
+    /// Write the normal, default diff3 output format.
+    fn write_normal(&mut self) -> Result<(), std::io::Error> {
+        for match_ in self.merged {
+            self.write_merge_lines(match_)?;
+            self.my_line_n += match_.variants.my_lines.len();
+            self.old_line_n += match_.variants.old_lines.len();
+            self.your_line_n += match_.variants.your_lines.len();
+        }
+        Ok(())
     }
-    Ok(())
+    /// Write the "normal" output format (diff3 default).
+    fn write_merge_lines(
+        &mut self,
+        match_: &MergeLines<&'_ Vec<u8>>,
+    ) -> Result<(), std::io::Error> {
+        self.my_line_n += match_.common_lines.len();
+        self.old_line_n += match_.common_lines.len();
+        self.your_line_n += match_.common_lines.len();
+        if !match_.variants.has_conflict() {
+            return Ok(());
+        }
+        let changes = match_.variants.infer_changes();
+        match changes {
+            Changed::Mine => {
+                self.output.write_all(b"====1\n")?;
+            }
+            Changed::Your => {
+                self.output.write_all(b"====3\n")?;
+            }
+            Changed::YourMine | Changed::YourMineSame => {
+                self.output.write_all(b"====\n")?;
+            }
+        }
+        self.write_header(1, match_.variants.my_lines.len(), self.my_line_n)?;
+        if !matches!(changes, Changed::Your) {
+            write_lines(&match_.variants.my_lines, b"  ", &mut self.output)?;
+        }
+        self.write_header(2, match_.variants.old_lines.len(), self.old_line_n)?;
+        if !matches!(changes, Changed::Mine) {
+            write_lines(&match_.variants.old_lines, b"  ", &mut self.output)?;
+        }
+        self.write_header(3, match_.variants.your_lines.len(), self.your_line_n)?;
+        write_lines(&match_.variants.your_lines, b"  ", &mut self.output)?;
+        Ok(())
+    }
+    /// Write a "normal output" hunk header
+    fn write_header(
+        &mut self,
+        i: usize,
+        line_count: usize,
+        n: usize,
+    ) -> Result<(), std::io::Error> {
+        match line_count {
+            0 => {
+                writeln!(self.output, "{i}:{n}a")?;
+            }
+            1 => {
+                writeln!(self.output, "{}:{}c", i, n + 1)?;
+            }
+            x => {
+                writeln!(self.output, "{}:{},{}c", i, n + 1, n + x)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 pub fn main(opts: Peekable<ArgsOs>) -> ExitCode {
