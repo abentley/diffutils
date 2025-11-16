@@ -59,7 +59,16 @@ enum MergeOutcome {
     /// with the other two.
     ConflictOldYours,
     ConflictAll,
+    /// All and MineYours represent the same situation but a different output.
     ConflictMineYours,
+}
+
+enum Changed {
+    Your,
+    Mine,
+    YourMine,
+    // This case is actually as if *old* had changed, but that implies time going backwards.
+    YourMineSame,
 }
 
 #[derive(Debug)]
@@ -72,16 +81,27 @@ impl<T: PartialEq> LineVariants<T> {
     fn has_conflict(&self) -> bool {
         self.my_lines != vec![] || self.old_lines != vec![] || self.your_lines != vec![]
     }
+    /// Infer which lines changed based on which match each other.
+    /// Assumes at least one set of lines doesn't match the other, or why are we even doing this?
+    fn infer_changes(&self) -> Changed {
+        if self.my_lines == self.old_lines {
+            Changed::Your
+        } else if self.your_lines == self.old_lines {
+            Changed::Mine
+        } else if self.your_lines == self.my_lines {
+            Changed::YourMineSame
+        } else {
+            Changed::YourMine
+        }
+    }
+    /// Based on what changed and what resolution we're doing, choose a merge outcome.
     fn calculate_merge(&self, concrete: ConcreteResolution) -> MergeOutcome {
         use MergeOutcome::*;
-        if self.my_lines == self.old_lines {
-            concrete.only_your
-        } else if self.your_lines == self.old_lines {
-            MyWins
-        } else if self.your_lines == self.my_lines {
-            concrete.conflict
-        } else {
-            concrete.overlap
+        match self.infer_changes() {
+            Changed::Your => concrete.only_your,
+            Changed::Mine => MyWins,
+            Changed::YourMineSame => concrete.conflict,
+            Changed::YourMine => concrete.overlap,
         }
     }
 }
@@ -163,6 +183,75 @@ impl<T: AsRef<Vec<u8>> + PartialEq> MergeLines<T> {
         self.variants.dump(labels, merge_outcome, stdout)?;
         Ok(())
     }
+    /// Write a "normal output" hunk header
+    fn write_header(
+        &self,
+        i: usize,
+        line_count: usize,
+        n: usize,
+        output: &mut impl Write,
+    ) -> Result<(), std::io::Error> {
+        match line_count {
+            0 => {
+                writeln!(output, "{i}:{n}a")?;
+            }
+            1 => {
+                writeln!(output, "{}:{}c", i, n + 1)?;
+            }
+            x => {
+                writeln!(output, "{}:{},{}c", i, n + 1, n + x)?;
+            }
+        }
+        Ok(())
+    }
+    /// Write the "normal" output format (diff3 default).
+    fn write_normal(
+        &self,
+        my_line_n: usize,
+        old_line_n: usize,
+        your_line_n: usize,
+        output: &mut impl Write,
+    ) -> Result<(), std::io::Error> {
+        if !self.variants.has_conflict() {
+            return Ok(());
+        }
+        let changes = self.variants.infer_changes();
+        match changes {
+            Changed::Mine => {
+                output.write_all(b"====1\n")?;
+            }
+            Changed::Your => {
+                output.write_all(b"====3\n")?;
+            }
+            Changed::YourMine | Changed::YourMineSame => {
+                output.write_all(b"====\n")?;
+            }
+        }
+        self.write_header(1, self.variants.my_lines.len(), my_line_n, output)?;
+        if !matches!(changes, Changed::Your) {
+            write_lines(&self.variants.my_lines, b"  ", output)?;
+        }
+        self.write_header(2, self.variants.old_lines.len(), old_line_n, output)?;
+        if !matches!(changes, Changed::Mine) {
+            write_lines(&self.variants.old_lines, b"  ", output)?;
+        }
+        self.write_header(3, self.variants.your_lines.len(), your_line_n, output)?;
+        write_lines(&self.variants.your_lines, b"  ", output)?;
+        Ok(())
+    }
+}
+
+/// Write a series of lines with a prefix.
+fn write_lines<T: AsRef<Vec<u8>>>(
+    lines: &Vec<T>,
+    prefix: &[u8],
+    output: &mut impl Write,
+) -> Result<(), std::io::Error> {
+    for line in lines {
+        output.write_all(prefix)?;
+        output.write_all(line.as_ref())?;
+    }
+    Ok(())
 }
 
 fn write_conflict<T: AsRef<Vec<u8>>>(
@@ -174,21 +263,15 @@ fn write_conflict<T: AsRef<Vec<u8>>>(
     stdout.write_all(b"<<<<<<< ")?;
     stdout.write_all(first.1.as_bytes())?;
     stdout.write_all(b"\n")?;
-    for line in first.0 {
-        stdout.write_all(line.as_ref())?;
-    }
+    write_lines(first.0, b"", stdout)?;
     if let Some(middle) = middle {
         stdout.write_all(b"||||||| ")?;
         stdout.write_all(middle.1.as_bytes())?;
         stdout.write_all(b"\n")?;
-        for line in middle.0 {
-            stdout.write_all(line.as_ref())?;
-        }
+        write_lines(middle.0, b"", stdout)?;
     }
     stdout.write_all(b"=======\n")?;
-    for line in last.0 {
-        stdout.write_all(line.as_ref())?;
-    }
+    write_lines(last.0, b"", stdout)?;
     stdout.write_all(b">>>>>>> ")?;
     stdout.write_all(last.1.as_bytes())?;
     stdout.write_all(b"\n")?;
@@ -516,11 +599,15 @@ fn real_main(opts: Peekable<ArgsOs>) -> Result<(), Error> {
         &variants.your_lines,
     );
     let merged = make_merged(matches);
+    let mut stdout = std::io::stdout();
     match operation {
         Operation::Merge(resolution) => {
-            write_merge(merged, &files, resolution, &mut std::io::stdout())?;
+            write_merge(merged, &files, resolution, &mut stdout)?;
         }
-        Operation::Normal | Operation::Ed(_) => {
+        Operation::Normal => {
+            write_normal(merged, &mut stdout)?;
+        }
+        Operation::Ed(_) => {
             todo!()
         }
     }
@@ -536,6 +623,26 @@ fn write_merge(
     let concrete = resolution.into();
     for match_ in merged {
         match_.dump(labels, match_.variants.calculate_merge(concrete), stdout)?;
+    }
+    Ok(())
+}
+
+/// Write the normal, default diff3 output format.
+fn write_normal(
+    merged: Vec<MergeLines<&Vec<u8>>>,
+    output: &mut impl Write,
+) -> Result<(), std::io::Error> {
+    let mut my_line_n = 0;
+    let mut old_line_n = 0;
+    let mut your_line_n = 0;
+    for match_ in merged {
+        my_line_n += match_.common_lines.len();
+        old_line_n += match_.common_lines.len();
+        your_line_n += match_.common_lines.len();
+        match_.write_normal(my_line_n, old_line_n, your_line_n, output)?;
+        my_line_n += match_.variants.my_lines.len();
+        old_line_n += match_.variants.old_lines.len();
+        your_line_n += match_.variants.your_lines.len();
     }
     Ok(())
 }
