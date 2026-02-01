@@ -54,3 +54,6 @@ When I ask you to re-read a file, always re-read it.
 
 ### **File format**
 *   All text files you create should use LF line endings.  Any file you create or update that has LF line endings should end with an LF.  Files you update that have CRLF line endings should not end with a line ending.
+
+### Rust
+*   Rust may be provided by nix develop environment, rather than by the system.  If standard rust tools like cargo are missing, try using a "nix develop" shell.
