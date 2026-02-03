@@ -104,6 +104,13 @@ impl<T: PartialEq> LineVariants<T> {
             Changed::YourMine => concrete.overlap,
         }
     }
+    fn as_ref(&self) -> LineVariants<&T> {
+        LineVariants::<&T>{
+            my_lines: self.my_lines.iter().collect(),
+            old_lines: self.old_lines.iter().collect(),
+            your_lines: self.your_lines.iter().collect(),
+        }
+    }
 }
 
 impl<T: AsRef<Vec<u8>> + PartialEq> LineVariants<T> {
@@ -164,6 +171,13 @@ impl<T: PartialEq> MergeLines<T> {
                 your_lines: vec![],
             },
         }
+    }
+    fn as_ref(&self) -> MergeLines<&T> {
+        let ml = MergeLines::<&T> {
+            common_lines: self.common_lines.iter().collect(),
+            variants: self.variants.as_ref(),
+        };
+        ml
     }
 }
 
@@ -905,5 +919,111 @@ mod tests {
             old: "old_label".into(),
             yours: "your_label".into(),
         }
+    }
+    #[test]
+    fn normal_writer() {
+        let ml = make_ml(b"common\n", b"my\n", b"old\n", b"your\n");
+        let ml2 = ml.as_ref();
+        let mut result = vec![];
+        let merged = vec![ml2];
+        let writer = NormalWriter {
+            merged: &merged,
+            output: &mut result,
+            my_line_n: 0,
+            old_line_n: 0,
+            your_line_n: 0,
+        }.write_normal();
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            indoc! {
+                "====
+                1:2c
+                  my
+                2:2c
+                  old
+                3:2c
+                  your
+                "
+            }
+        );
+    }
+    #[test]
+    fn normal_writer_range() {
+        let ml = make_ml(b"common\n", b"my\nthing\n", b"old\n", b"your\n");
+        let ml2 = ml.as_ref();
+        let mut result = vec![];
+        let merged = vec![ml2];
+        let writer = NormalWriter {
+            merged: &merged,
+            output: &mut result,
+            my_line_n: 0,
+            old_line_n: 0,
+            your_line_n: 0,
+        }.write_normal();
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            indoc! {
+                "====
+                1:2,3c
+                  my
+                  thing
+                2:2c
+                  old
+                3:2c
+                  your
+                "
+            }
+        );
+    }
+    #[test]
+    fn normal_writer_add() {
+        let ml = make_ml(b"common\n", b"", b"old\n", b"your\n");
+        let ml2 = ml.as_ref();
+        let mut result = vec![];
+        let merged = vec![ml2];
+        let writer = NormalWriter {
+            merged: &merged,
+            output: &mut result,
+            my_line_n: 0,
+            old_line_n: 0,
+            your_line_n: 0,
+        }.write_normal();
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            indoc! {
+                "====
+                1:1a
+                2:2c
+                  old
+                3:2c
+                  your
+                "
+            }
+        );
+    }
+    #[test]
+    fn normal_writer_del() {
+        let ml = make_ml(b"common\n", b"mine\n", b"", b"");
+        let ml2 = ml.as_ref();
+        let mut result = vec![];
+        let merged = vec![ml2];
+        let writer = NormalWriter {
+            merged: &merged,
+            output: &mut result,
+            my_line_n: 0,
+            old_line_n: 0,
+            your_line_n: 0,
+        }.write_normal();
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            indoc! {
+                "====1
+                1:2c
+                  mine
+                2:1a
+                3:1a
+                "
+            }
+        );
     }
 }
