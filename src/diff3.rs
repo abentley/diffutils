@@ -653,16 +653,42 @@ impl<T: Write> NormalWriter<'_, T> {
         line_count: usize,
         n: usize,
     ) -> Result<(), std::io::Error> {
+        write!(self.output, "{i}:")?;
         match line_count {
             0 => {
-                writeln!(self.output, "{i}:{n}a")?;
+                EdOperation::Add(n)
             }
-            1 => {
-                writeln!(self.output, "{}:{}c", i, n + 1)?;
+            count => EdOperation::Change(n, count - 1)
+        }.write_header(&mut self.output)
+    }
+}
+
+enum EdOperation {
+    Add(usize),
+    Change(usize, usize),
+    Delete(usize, usize),
+}
+
+impl EdOperation {
+    fn write_header(&self, mut output: impl Write) -> Result<(), std::io::Error> {
+        use EdOperation::*;
+        match &self {
+            Add(pos) => {
+                writeln!(output, "{pos}a")?;
             }
-            x => {
-                writeln!(self.output, "{}:{},{}c", i, n + 1, n + x)?;
+            Change(pos, 0) => {
+                writeln!(output, "{}c", pos + 1)?;
             }
+            Change(pos, count) => {
+                writeln!(output, "{},{}c", pos + 1, pos + count + 1)?;
+            }
+            Delete(pos, 0) => {
+                writeln!(output, "{}d", pos + 1)?;
+            }
+            Delete(pos, count) => {
+                writeln!(output, "{},{}d", pos + 1, pos + count + 1)?;
+            }
+            _ => todo!()
         }
         Ok(())
     }
@@ -1002,28 +1028,48 @@ mod tests {
         );
     }
     #[test]
-    fn normal_writer_del() {
-        let ml = make_ml(b"common\n", b"mine\n", b"", b"");
-        let ml2 = ml.as_ref();
+    fn test_write_header_add() {
         let mut result = vec![];
-        let merged = vec![ml2];
-        let writer = NormalWriter {
-            merged: &merged,
-            output: &mut result,
-            my_line_n: 0,
-            old_line_n: 0,
-            your_line_n: 0,
-        }.write_normal();
+        EdOperation::Add(1).write_header(&mut result);
         assert_eq!(
             String::from_utf8_lossy(&result),
-            indoc! {
-                "====1
-                1:2c
-                  mine
-                2:1a
-                3:1a
-                "
-            }
+            "1a\n"
+        );
+    }
+    #[test]
+    fn test_write_header_one_change() {
+        let mut result = vec![];
+        EdOperation::Change(1, 0).write_header(&mut result);
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            "2c\n"
+        );
+    }
+    #[test]
+    fn test_write_header_range_change() {
+        let mut result = vec![];
+        EdOperation::Change(1, 1).write_header(&mut result);
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            "2,3c\n"
+        );
+    }
+    #[test]
+    fn test_write_header_one_delete () {
+        let mut result = vec![];
+        EdOperation::Delete(1, 0).write_header(&mut result);
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            "2d\n"
+        );
+    }
+    #[test]
+    fn test_write_header_range_delete () {
+        let mut result = vec![];
+        EdOperation::Delete(1, 1).write_header(&mut result);
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            "2,3d\n"
         );
     }
 }
