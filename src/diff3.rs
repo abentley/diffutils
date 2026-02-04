@@ -592,15 +592,15 @@ fn write_merge(
     Ok(())
 }
 
-struct NormalWriter<'a, T: Write> {
-    merged: &'a Vec<MergeLines<&'a Vec<u8>>>,
+struct NormalWriter<'a, T: Write, T1: PartialEq> {
+    merged: &'a Vec<MergeLines<&'a T1>>,
     output: T,
     my_line_n: usize,
     old_line_n: usize,
     your_line_n: usize,
 }
 
-impl<T: Write> NormalWriter<'_, T> {
+impl<T: Write, T1: PartialEq+AsRef<Vec<u8>>> NormalWriter<'_, T, T1> {
     /// Write the normal, default diff3 output format.
     fn write_normal(&mut self) -> Result<(), std::io::Error> {
         for match_ in self.merged {
@@ -614,7 +614,7 @@ impl<T: Write> NormalWriter<'_, T> {
     /// Write the "normal" output format (diff3 default).
     fn write_merge_lines(
         &mut self,
-        match_: &MergeLines<&'_ Vec<u8>>,
+        match_: &MergeLines<&'_ T1>,
     ) -> Result<(), std::io::Error> {
         self.my_line_n += match_.common_lines.len();
         self.old_line_n += match_.common_lines.len();
@@ -688,7 +688,6 @@ impl EdOperation {
             Delete(pos, count) => {
                 writeln!(output, "{},{}d", pos + 1, pos + count + 1)?;
             }
-            _ => todo!()
         }
         Ok(())
     }
