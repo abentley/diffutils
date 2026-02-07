@@ -430,8 +430,8 @@ impl From<Resolution> for ConcreteResolution {
             _ => YourWins,
         };
         let conflict = match resolution {
-            PickOverlap => MyWins,
-            BracketOverlap | PickNonOverlap | PickYour | PickOverlapBracketConflicts => YourWins,
+            PickOverlap | PickYour => MyWins,
+            BracketOverlap | PickNonOverlap | PickOverlapBracketConflicts => YourWins,
             BracketAll => ConflictOldYours,
         };
         let overlap = match resolution {
@@ -578,11 +578,11 @@ fn real_main(opts: Peekable<ArgsOs>) -> Result<(), Error> {
             }
             .write_normal()?;
         }
-        Operation::Ed(resolution) => EdWriter {
+        Operation::Ed(resolution, wq) => EdWriter {
             merged: merged,
             output: &mut stdout,
         }
-        .write(&files, resolution.into()),
+        .write_back(&files, resolution.into(), wq),
     }
     Ok(())
 }
@@ -703,7 +703,7 @@ struct EdWriter<T: Write, T1: PartialEq> {
     output: T,
 }
 
-impl<T: Write, T1: PartialEq + AsRef<Vec<u8>>> EdWriter<T, T1> {
+impl<T: Write, T1: PartialEq + AsRef<Vec<u8>> + std::fmt::Debug> EdWriter<T, T1> {
     fn write(&mut self, labels: &MergeLabels, concrete: ConcreteResolution) {
         use EdOperation::*;
         use MergeOutcome::*;
@@ -740,6 +740,46 @@ impl<T: Write, T1: PartialEq + AsRef<Vec<u8>>> EdWriter<T, T1> {
                 writeln!(self.output, ".");
             }
             pos += offset;
+        }
+    }
+    fn write_back(&mut self, labels: &MergeLabels, concrete: ConcreteResolution, wq: bool) {
+        use EdOperation::*;
+        use MergeOutcome::*;
+        let mut cur_line = 0;
+        for ml in &self.merged {
+            cur_line += ml.common_lines.len();
+            cur_line += ml.variants.my_lines.len();
+        }
+        for ml in self.merged.iter().rev() {
+            if ml.variants.my_lines.len() !=0 || ml.variants.your_lines.len() !=0 || ml.variants.old_lines.len() !=0
+            {
+                let merge = ml.variants.calculate_merge(concrete);
+                let right_empty = match merge {
+                    MyWins => None,
+                    YourWins => {
+                        Some(ml.variants.your_lines.len() != 0)
+                    }
+                    ConflictOldYours | ConflictMineYours | ConflictAll => {
+                        Some(true)
+                    }
+                };
+                //writeln!(self.output, "{:?}", merge);
+                //writeln!(self.output, "{:?}", ml.variants);
+                if let Some(right_empty) = right_empty {
+                    let op = make_operation(cur_line, ml.variants.my_lines.len(), right_empty);
+                    op.write_header(&mut self.output);
+                    if let EdOperation::Delete(_, _) = op {} else {
+                        ml.variants.dump(labels, merge, &mut self.output);
+                        writeln!(self.output, ".");
+                    }
+                }
+            }
+            cur_line -= ml.variants.my_lines.len();
+            cur_line -= ml.common_lines.len();
+        }
+        if wq {
+            writeln!(self.output, "w");
+            writeln!(self.output, "q");
         }
     }
 }
@@ -1141,7 +1181,7 @@ mod tests {
             merged: merged,
             output: &mut result,
         }
-        .write(&merge_labels(), Resolution::BracketAll.into());
+        .write_back(&merge_labels(), Resolution::BracketAll.into(), false);
         assert_eq!(
             String::from_utf8_lossy(&result),
             indoc! {
