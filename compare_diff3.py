@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 
-import subprocess
 import os
+import shutil
+import subprocess
 import sys
-from pathlib import Path
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable
 
 
@@ -164,8 +166,10 @@ def _get_and_filter_file_versions(strategy, commit, filename):
         )
         return None
 
-    if (file_versions.myfile == file_versions.oldfile and
-            file_versions.yourfile == file_versions.oldfile):
+    if (
+        file_versions.myfile == file_versions.oldfile and
+        file_versions.yourfile == file_versions.oldfile
+    ):
         print(f'      Skipping {filename}: All three versions are ' 'identical.',
               file=sys.stderr)
         return None
@@ -197,6 +201,63 @@ def _iter_conflicted_files(strategy):
                 yield commit, filename, file_versions
 
 
+def apply_ed_script(file_path: Path, script: str):
+    """Applies an ed script to a file."""
+    # ed doesn't create a file, so we need to handle that.
+    # The parent directory is guaranteed to exist.
+    if not file_path.exists():
+        file_path.touch()
+    # The ed script needs a trailing newline
+    if not script.endswith('\n'):
+        script += '\n'
+    # The ed script needs a `w` command to write the file and a `q` command to quit
+    script += 'w\nq\n'
+
+    try:
+        subprocess.run(
+            ['ed', str(file_path)],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.strip()
+        if stderr == '?':
+            # ed outputs '?' to stderr for many errors.  Unfortunately, we
+            # can't get any more information than that.
+            print(f"Error applying ed script to {file_path}", file=sys.stderr)
+        else:
+            print(f"Error applying ed script to {file_path}: {stderr}", file=sys.stderr)
+
+
+def _are_outputs_equivalent(local_diff3: str, system_diff3: str, diff3_options: list[str], paths: FileVersions) -> bool:
+    """Compares the outputs of local and system diff3 commands."""
+    if local_diff3 == system_diff3:
+        return True
+
+    ed_output_options = ['-e', '--ed', '-A', '--show-all', '-E', '--show-overlap', '-3', '--easy-only', '-x', '--overlap-only', '-X']
+    is_ed_output_option_present = any(opt in diff3_options for opt in ed_output_options)
+    is_merge_present = any(opt in diff3_options for opt in ['-m', '--merge'])
+
+    is_ed_output = is_ed_output_option_present and not is_merge_present
+    if not is_ed_output:
+        return False
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir_path = Path(temp_dir)
+        local_result_path = temp_dir_path / 'local_result.txt'
+        system_result_path = temp_dir_path / 'system_result.txt'
+
+        shutil.copy(paths.myfile, local_result_path)
+        shutil.copy(paths.myfile, system_result_path)
+
+        apply_ed_script(local_result_path, local_diff3)
+        apply_ed_script(system_result_path, system_diff3)
+
+        return local_result_path.read_text() == system_result_path.read_text()
+
+
 def main():
     """Main function."""
     diff3_options = sys.argv[1:]
@@ -206,12 +267,12 @@ def main():
             f'      Performing diff3 comparison for {filename}...', file=sys.stderr)
         output_dir = (Path('diff_outputs') /
                       f"{filename.replace('/', '_')}_{commit}")
-        paths, local_diff3, system_diff3 = run_diff3(file_versions, output_dir, diff3_options)
+        paths, local_diff3, system_diff3 = run_diff3(
+            file_versions, output_dir, diff3_options)
 
-        if local_diff3 == system_diff3:
-            for path in paths:
-                path.unlink()
-            output_dir.rmdir()
+        if _are_outputs_equivalent(local_diff3, system_diff3, diff3_options, paths):
+            if output_dir.exists():
+                shutil.rmtree(output_dir)
         else:
             (output_dir / 'local_diff3.txt').write_text(local_diff3)
             (output_dir / 'system_diff3.txt').write_text(system_diff3)
