@@ -485,6 +485,7 @@ fn load(
             }
             b"-E" | b"--show-overlap" => {
                 show_overlap = true;
+                ed = true;
             }
             b"-m" | b"--merge" => {
                 merge = true;
@@ -704,77 +705,35 @@ struct EdWriter<T: Write, T1: PartialEq> {
 }
 
 impl<T: Write, T1: PartialEq + AsRef<Vec<u8>> + std::fmt::Debug> EdWriter<T, T1> {
-    fn write(&mut self, labels: &MergeLabels, concrete: ConcreteResolution) {
-        use EdOperation::*;
-        use MergeOutcome::*;
-        let mut pos: usize = 0;
-        for ml in &self.merged {
-            pos += ml.common_lines.len();
-            let merge = ml.variants.calculate_merge(concrete);
-            let (offset, right_lines) = match merge {
-                MyWins => (ml.variants.my_lines.len(), 0),
-                YourWins => {
-                    let your_count = ml.variants.your_lines.len();
-                    (your_count, your_count)
-                }
-                ConflictOldYours => {
-                    let con_count = ml.variants.your_lines.len() + ml.variants.old_lines.len() + 3;
-                    (con_count, con_count)
-                }
-                ConflictMineYours => {
-                    let con_count = ml.variants.your_lines.len() + ml.variants.my_lines.len() + 3;
-                    (con_count, con_count)
-                }
-                ConflictAll => {
-                    let con_count = (ml.variants.your_lines.len()
-                        + ml.variants.my_lines.len()
-                        + ml.variants.old_lines.len()
-                        + 4);
-                    (con_count, con_count)
-                }
-            };
-            if !matches!(merge, MyWins) {
-                let op = make_operation(pos, ml.variants.my_lines.len(), right_lines == 0);
-                op.write_header(&mut self.output);
-                ml.variants.dump(labels, merge, &mut self.output);
-                writeln!(self.output, ".");
-            }
-            pos += offset;
-        }
-    }
+    /// Write the diff backwards, starting from the last line and ending on the first.
+    /// This avoids the need to track state offsets, but is complicated in its own way.
     fn write_back(&mut self, labels: &MergeLabels, concrete: ConcreteResolution, wq: bool) {
         use EdOperation::*;
         use MergeOutcome::*;
         let mut cur_line = 0;
+        // Find the index of the last line
         for ml in &self.merged {
             cur_line += ml.common_lines.len();
             cur_line += ml.variants.my_lines.len();
         }
         for ml in self.merged.iter().rev() {
-            if ml.variants.my_lines.len() !=0 || ml.variants.your_lines.len() !=0 || ml.variants.old_lines.len() !=0
-            {
-                let merge = ml.variants.calculate_merge(concrete);
-                let right_empty = match merge {
-                    MyWins => None,
-                    YourWins => {
-                        Some(ml.variants.your_lines.len() != 0)
-                    }
-                    ConflictOldYours | ConflictMineYours | ConflictAll => {
-                        Some(true)
-                    }
-                };
-                //writeln!(self.output, "{:?}", merge);
-                //writeln!(self.output, "{:?}", ml.variants);
-                if let Some(right_empty) = right_empty {
-                    let op = make_operation(cur_line, ml.variants.my_lines.len(), right_empty);
-                    op.write_header(&mut self.output);
-                    if let EdOperation::Delete(_, _) = op {} else {
-                        ml.variants.dump(labels, merge, &mut self.output);
-                        writeln!(self.output, ".");
-                    }
+            // Commands start with the cursor positioned at the beginning of the block.
+            cur_line -= ml.variants.my_lines.len();
+            let merge = ml.variants.calculate_merge(concrete);
+            let right_empty = match merge {
+                MyWins => None,
+                YourWins => Some(ml.variants.your_lines.len() == 0),
+                ConflictOldYours | ConflictMineYours | ConflictAll => Some(false),
+            };
+            let op = make_operation(cur_line, ml.variants.my_lines.len(), right_empty);
+            if let Some(op) = op {
+                op.write_header(&mut self.output);
+                if let EdOperation::Delete(_, _) = op {
+                } else {
+                    ml.variants.dump(labels, merge, &mut self.output);
+                    writeln!(self.output, ".");
                 }
             }
-            cur_line -= ml.variants.my_lines.len();
             cur_line -= ml.common_lines.len();
         }
         if wq {
@@ -784,12 +743,16 @@ impl<T: Write, T1: PartialEq + AsRef<Vec<u8>> + std::fmt::Debug> EdWriter<T, T1>
     }
 }
 
-fn make_operation(pos: usize, left_lines: usize, right_empty: bool) -> EdOperation {
+fn make_operation(pos: usize, left_lines: usize, right_empty: Option<bool>) -> Option<EdOperation> {
     use EdOperation::*;
+    let Some(right_empty) = right_empty else {
+        return None;
+    };
     match (left_lines, right_empty) {
-        (0, _) => Add(pos),
-        (count, true) => Delete(pos, count - 1),
-        (count, false) => Change(pos, count - 1),
+        (0, true) => None,
+        (0, false) => Some(Add(pos)),
+        (count, true) => Some(Delete(pos, count - 1)),
+        (count, false) => Some(Change(pos, count - 1)),
     }
 }
 
@@ -1051,7 +1014,7 @@ mod tests {
         let ml2 = ml.as_ref();
         let mut result = vec![];
         let merged = vec![ml2];
-        let writer = NormalWriter {
+        NormalWriter {
             merged: &merged,
             output: &mut result,
             my_line_n: 0,
@@ -1079,7 +1042,7 @@ mod tests {
         let ml2 = ml.as_ref();
         let mut result = vec![];
         let merged = vec![ml2];
-        let writer = NormalWriter {
+        NormalWriter {
             merged: &merged,
             output: &mut result,
             my_line_n: 0,
@@ -1160,16 +1123,27 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&result), "2,3d\n");
     }
     #[test]
+    fn test_make_operation_none() {
+        assert_eq!(make_operation(5, 0, Some(true)), None);
+        assert_eq!(make_operation(5, 0, None), None);
+    }
+    #[test]
     fn test_make_operation_add() {
-        assert_eq!(make_operation(5, 0, false), EdOperation::Add(5));
+        assert_eq!(make_operation(5, 0, Some(false)), Some(EdOperation::Add(5)));
     }
     #[test]
     fn test_make_operation_delete() {
-        assert_eq!(make_operation(5, 4, true), EdOperation::Delete(5, 3));
+        assert_eq!(
+            make_operation(5, 4, Some(true)),
+            Some(EdOperation::Delete(5, 3))
+        );
     }
     #[test]
     fn test_make_operation_change() {
-        assert_eq!(make_operation(5, 4, false), EdOperation::Change(5, 3));
+        assert_eq!(
+            make_operation(5, 4, Some(false)),
+            Some(EdOperation::Change(5, 3))
+        );
     }
     #[test]
     fn ed_writer_aab() {
@@ -1202,7 +1176,7 @@ mod tests {
             merged: merged,
             output: &mut result,
         }
-        .write(&merge_labels(), Resolution::BracketAll.into());
+        .write_back(&merge_labels(), Resolution::BracketAll.into(), false);
         assert_eq!(
             String::from_utf8_lossy(&result),
             indoc! {
@@ -1223,8 +1197,8 @@ mod tests {
             merged: merged,
             output: &mut result,
         }
-        .write(&merge_labels(), Resolution::BracketAll.into());
-        assert_eq!(String::from_utf8_lossy(&result), "2d\n.\n",);
+        .write_back(&merge_labels(), Resolution::BracketAll.into(), false);
+        assert_eq!(String::from_utf8_lossy(&result), "2d\n",);
     }
     #[test]
     fn ed_writer_aa_null_range() {
@@ -1236,8 +1210,8 @@ mod tests {
             merged: merged,
             output: &mut result,
         }
-        .write(&merge_labels(), Resolution::BracketAll.into());
-        assert_eq!(String::from_utf8_lossy(&result), "2,3d\n.\n",);
+        .write_back(&merge_labels(), Resolution::BracketAll.into(), false);
+        assert_eq!(String::from_utf8_lossy(&result), "2,3d\n",);
     }
     #[test]
     fn ed_writer_abc() {
@@ -1249,7 +1223,7 @@ mod tests {
             merged: merged,
             output: &mut result,
         }
-        .write(&merge_labels(), Resolution::BracketAll.into());
+        .write_back(&merge_labels(), Resolution::BracketAll.into(), false);
         assert_eq!(
             String::from_utf8_lossy(&result),
             indoc! {
