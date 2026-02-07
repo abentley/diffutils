@@ -728,10 +728,12 @@ impl<T: Write, T1: PartialEq + AsRef<Vec<u8>> + std::fmt::Debug> EdWriter<T, T1>
             let op = make_operation(cur_line, ml.variants.my_lines.len(), right_empty);
             if let Some(op) = op {
                 op.write_header(&mut self.output);
-                if let EdOperation::Delete(_, _) = op {
-                } else {
-                    ml.variants.dump(labels, merge, &mut self.output);
-                    writeln!(self.output, ".");
+                match op {
+                    Delete(_,_) => {}
+                    Change(_,_) | Add(_) => {
+                        ml.variants.dump(labels, merge, &mut self.output);
+                        writeln!(self.output, ".");
+                    }
                 }
             }
             cur_line -= ml.common_lines.len();
@@ -745,14 +747,12 @@ impl<T: Write, T1: PartialEq + AsRef<Vec<u8>> + std::fmt::Debug> EdWriter<T, T1>
 
 fn make_operation(pos: usize, left_lines: usize, right_empty: Option<bool>) -> Option<EdOperation> {
     use EdOperation::*;
-    let Some(right_empty) = right_empty else {
-        return None;
-    };
     match (left_lines, right_empty) {
-        (0, true) => None,
-        (0, false) => Some(Add(pos)),
-        (count, true) => Some(Delete(pos, count - 1)),
-        (count, false) => Some(Change(pos, count - 1)),
+        (_, None) => None,
+        (0, Some(true)) => None,
+        (0, Some(false)) => Some(Add(pos)),
+        (count, Some(true)) => Some(Delete(pos, count - 1)),
+        (count, Some(false)) => Some(Change(pos, count - 1)),
     }
 }
 
@@ -1236,6 +1236,35 @@ mod tests {
                 c
                 >>>>>>> your_label
                 .
+                "
+            }
+        );
+    }
+    #[test]
+    fn ed_writer_wq() {
+        let ml = make_ml(b"common\n", b"a\n", b"b\n", b"c\n");
+        let ml2 = ml.as_ref();
+        let mut result = vec![];
+        let merged = vec![ml2];
+        let writer = EdWriter {
+            merged: merged,
+            output: &mut result,
+        }
+        .write_back(&merge_labels(), Resolution::BracketAll.into(), true);
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            indoc! {
+                "2c
+                <<<<<<< my_label
+                a
+                ||||||| old_label
+                b
+                =======
+                c
+                >>>>>>> your_label
+                .
+                w
+                q
                 "
             }
         );
