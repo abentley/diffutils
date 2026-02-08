@@ -113,44 +113,75 @@ impl<T: PartialEq> LineVariants<T> {
     }
 }
 
-impl<T: AsRef<Vec<u8>> + PartialEq> LineVariants<T> {
-    fn dump(
-        &self,
+struct Dumper<'a, T: Write> {
+    force_nl: bool,
+    stdout: &'a mut T,
+}
+
+impl<T1: Write> Dumper<'_, T1> {
+    fn write_lines<T: AsRef<Vec<u8>>>(&mut self, lines: &[T]) -> Result<(), std::io::Error> {
+        for line in lines {
+            self.stdout.write_all(line.as_ref())?;
+            if self.force_nl && line.as_ref().iter().rev().next() != Some(&b'\n'.into()) {
+                self.stdout.write_all(b"\n")?;
+            }
+        }
+        Ok(())
+    }
+
+    fn dump<T: AsRef<Vec<u8>> + PartialEq>(
+        &mut self,
         labels: &MergeLabels,
+        lv: &LineVariants<T>,
         merge_outcome: MergeOutcome,
-        stdout: &mut impl Write,
     ) -> Result<(), std::io::Error> {
         use MergeOutcome::*;
         match merge_outcome {
             MyWins => {
-                for line in &self.my_lines {
-                    stdout.write_all(line.as_ref())?;
-                }
+                self.write_lines(&lv.my_lines)?;
             }
-            ConflictOldYours => write_conflict(
-                (&self.old_lines, &labels.old),
+            ConflictOldYours => self.write_conflict(
+                (&lv.old_lines, &labels.old),
                 None,
-                (&self.your_lines, &labels.yours),
-                stdout,
+                (&lv.your_lines, &labels.yours),
             )?,
-            ConflictMineYours => write_conflict(
-                (&self.my_lines, &labels.mine),
+            ConflictMineYours => self.write_conflict(
+                (&lv.my_lines, &labels.mine),
                 None,
-                (&self.your_lines, &labels.yours),
-                stdout,
+                (&lv.your_lines, &labels.yours),
             )?,
-            ConflictAll => write_conflict(
-                (&self.my_lines, &labels.mine),
-                Some((&self.old_lines, &labels.old)),
-                (&self.your_lines, &labels.yours),
-                stdout,
+            ConflictAll => self.write_conflict(
+                (&lv.my_lines, &labels.mine),
+                Some((&lv.old_lines, &labels.old)),
+                (&lv.your_lines, &labels.yours),
             )?,
             YourWins => {
-                for line in &self.your_lines {
-                    stdout.write_all(line.as_ref())?;
-                }
+                self.write_lines(&lv.your_lines)?;
             }
         };
+        Ok(())
+    }
+    fn write_conflict<T: AsRef<Vec<u8>>>(
+        &mut self,
+        first: (&Vec<T>, &OsString),
+        middle: Option<(&Vec<T>, &OsString)>,
+        last: (&Vec<T>, &OsString),
+    ) -> Result<(), std::io::Error> {
+        self.stdout.write_all(b"<<<<<<< ")?;
+        self.stdout.write_all(first.1.as_bytes())?;
+        self.stdout.write_all(b"\n")?;
+        self.write_lines(first.0)?;
+        if let Some(middle) = middle {
+            self.stdout.write_all(b"||||||| ")?;
+            self.stdout.write_all(middle.1.as_bytes())?;
+            self.stdout.write_all(b"\n")?;
+            self.write_lines(middle.0)?;
+        }
+        self.stdout.write_all(b"=======\n")?;
+        self.write_lines(last.0)?;
+        self.stdout.write_all(b">>>>>>> ")?;
+        self.stdout.write_all(last.1.as_bytes())?;
+        self.stdout.write_all(b"\n")?;
         Ok(())
     }
 }
@@ -194,7 +225,11 @@ impl<T: AsRef<Vec<u8>> + PartialEq> MergeLines<T> {
         if !self.variants.has_conflict() {
             return Ok(());
         }
-        self.variants.dump(labels, merge_outcome, stdout)?;
+        Dumper {
+            force_nl: false,
+            stdout,
+        }
+        .dump(labels, &self.variants, merge_outcome)?;
         Ok(())
     }
 }
@@ -209,30 +244,6 @@ fn write_lines<T: AsRef<Vec<u8>>>(
         output.write_all(prefix)?;
         output.write_all(line.as_ref())?;
     }
-    Ok(())
-}
-
-fn write_conflict<T: AsRef<Vec<u8>>>(
-    first: (&Vec<T>, &OsString),
-    middle: Option<(&Vec<T>, &OsString)>,
-    last: (&Vec<T>, &OsString),
-    stdout: &mut impl Write,
-) -> Result<(), std::io::Error> {
-    stdout.write_all(b"<<<<<<< ")?;
-    stdout.write_all(first.1.as_bytes())?;
-    stdout.write_all(b"\n")?;
-    write_lines(first.0, b"", stdout)?;
-    if let Some(middle) = middle {
-        stdout.write_all(b"||||||| ")?;
-        stdout.write_all(middle.1.as_bytes())?;
-        stdout.write_all(b"\n")?;
-        write_lines(middle.0, b"", stdout)?;
-    }
-    stdout.write_all(b"=======\n")?;
-    write_lines(last.0, b"", stdout)?;
-    stdout.write_all(b">>>>>>> ")?;
-    stdout.write_all(last.1.as_bytes())?;
-    stdout.write_all(b"\n")?;
     Ok(())
 }
 
@@ -711,6 +722,10 @@ impl<T: Write, T1: PartialEq + AsRef<Vec<u8>> + std::fmt::Debug> EdWriter<T, T1>
         use EdOperation::*;
         use MergeOutcome::*;
         let mut cur_line = 0;
+        let mut dumper = Dumper {
+            force_nl: true,
+            stdout: &mut self.output,
+        };
         // Find the index of the last line
         for ml in &self.merged {
             cur_line += ml.common_lines.len();
@@ -727,20 +742,20 @@ impl<T: Write, T1: PartialEq + AsRef<Vec<u8>> + std::fmt::Debug> EdWriter<T, T1>
             };
             let op = make_operation(cur_line, ml.variants.my_lines.len(), right_empty);
             if let Some(op) = op {
-                op.write_header(&mut self.output);
+                op.write_header(&mut dumper.stdout);
                 match op {
-                    Delete(_,_) => {}
-                    Change(_,_) | Add(_) => {
-                        ml.variants.dump(labels, merge, &mut self.output);
-                        writeln!(self.output, ".");
+                    Delete(_, _) => {}
+                    Change(_, _) | Add(_) => {
+                        dumper.dump(labels, &ml.variants, merge);
+                        writeln!(dumper.stdout, ".");
                     }
                 }
             }
             cur_line -= ml.common_lines.len();
         }
         if wq {
-            writeln!(self.output, "w");
-            writeln!(self.output, "q");
+            writeln!(dumper.stdout, "w");
+            writeln!(dumper.stdout, "q");
         }
     }
 }
@@ -851,14 +866,17 @@ mod tests {
             match_sequence(&input("bc"), &input("c"), &input("bc"))
         )
     }
+    fn make_lv(my: &[u8], old: &[u8], your: &[u8]) -> LineVariants<Vec<u8>> {
+        LineVariants::<Vec<u8>> {
+            my_lines: split(my),
+            old_lines: split(old),
+            your_lines: split(your),
+        }
+    }
     fn make_ml(common: &[u8], my: &[u8], old: &[u8], your: &[u8]) -> MergeLines<Vec<u8>> {
         MergeLines::<Vec<u8>> {
             common_lines: split(common),
-            variants: LineVariants::<Vec<u8>> {
-                my_lines: split(my),
-                old_lines: split(old),
-                your_lines: split(your),
-            },
+            variants: make_lv(my, old, your),
         }
     }
     #[test]
@@ -1265,6 +1283,275 @@ mod tests {
                 .
                 w
                 q
+                "
+            }
+        );
+    }
+    #[test]
+    fn test_dump_your_wins() {
+        let mut result = vec![];
+        Dumper {
+            force_nl: false,
+            stdout: &mut result,
+        }
+        .dump(
+            &merge_labels(),
+            &make_lv(b"a\n", b"b\n", b"c\n"),
+            MergeOutcome::YourWins,
+        );
+        assert_eq!(String::from_utf8_lossy(&result), "c\n");
+        result.clear();
+        Dumper {
+            force_nl: false,
+            stdout: &mut result,
+        }
+        .dump(
+            &merge_labels(),
+            &make_lv(b"a\n", b"b\n", b"c"),
+            MergeOutcome::YourWins,
+        );
+        assert_eq!(String::from_utf8_lossy(&result), "c");
+        result.clear();
+        Dumper {
+            force_nl: true,
+            stdout: &mut result,
+        }
+        .dump(
+            &merge_labels(),
+            &make_lv(b"a\n", b"b\n", b"c"),
+            MergeOutcome::YourWins,
+        );
+        assert_eq!(String::from_utf8_lossy(&result), "c\n");
+    }
+    #[test]
+    fn test_dump_my_wins() {
+        let mut result = vec![];
+        Dumper {
+            force_nl: false,
+            stdout: &mut result,
+        }
+        .dump(
+            &merge_labels(),
+            &make_lv(b"a\n", b"b\n", b"c\n"),
+            MergeOutcome::MyWins,
+        );
+        assert_eq!(String::from_utf8_lossy(&result), "a\n");
+        result.clear();
+        Dumper {
+            force_nl: false,
+            stdout: &mut result,
+        }
+        .dump(
+            &merge_labels(),
+            &make_lv(b"a", b"b\n", b"c"),
+            MergeOutcome::MyWins,
+        );
+        assert_eq!(String::from_utf8_lossy(&result), "a");
+        result.clear();
+        Dumper {
+            force_nl: true,
+            stdout: &mut result,
+        }
+        .dump(
+            &merge_labels(),
+            &make_lv(b"a", b"b\n", b"c"),
+            MergeOutcome::MyWins,
+        );
+        assert_eq!(String::from_utf8_lossy(&result), "a\n");
+    }
+    #[test]
+    fn test_conflict_old_yours() {
+        let mut result = vec![];
+        Dumper {
+            force_nl: false,
+            stdout: &mut result,
+        }
+        .dump(
+            &merge_labels(),
+            &make_lv(b"a\n", b"b\n", b"c\n"),
+            MergeOutcome::ConflictOldYours,
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            indoc! {
+                "<<<<<<< old_label
+                b
+                =======
+                c
+                >>>>>>> your_label
+                "
+            }
+        );
+        result.clear();
+        Dumper {
+            force_nl: false,
+            stdout: &mut result,
+        }
+        .dump(
+            &merge_labels(),
+            &make_lv(b"a", b"b", b"c"),
+            MergeOutcome::ConflictOldYours,
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            indoc! {
+                "<<<<<<< old_label
+                b=======
+                c>>>>>>> your_label
+                "
+            }
+        );
+        result.clear();
+        Dumper {
+            force_nl: true,
+            stdout: &mut result,
+        }
+        .dump(
+            &merge_labels(),
+            &make_lv(b"a", b"b", b"c"),
+            MergeOutcome::ConflictOldYours,
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            indoc! {
+                "<<<<<<< old_label
+                b
+                =======
+                c
+                >>>>>>> your_label
+                "
+            }
+        );
+    }
+    #[test]
+    fn test_conflict_all() {
+        let mut result = vec![];
+        Dumper {
+            force_nl: false,
+            stdout: &mut result,
+        }
+        .dump(
+            &merge_labels(),
+            &make_lv(b"a\n", b"b\n", b"c\n"),
+            MergeOutcome::ConflictAll,
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            indoc! {
+                "<<<<<<< my_label
+                a
+                ||||||| old_label
+                b
+                =======
+                c
+                >>>>>>> your_label
+                "
+            }
+        );
+        result.clear();
+        Dumper {
+            force_nl: false,
+            stdout: &mut result,
+        }
+        .dump(
+            &merge_labels(),
+            &make_lv(b"a", b"b", b"c"),
+            MergeOutcome::ConflictAll,
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            indoc! {
+                "<<<<<<< my_label
+                a||||||| old_label
+                b=======
+                c>>>>>>> your_label
+                "
+            }
+        );
+        result.clear();
+        Dumper {
+            force_nl: true,
+            stdout: &mut result,
+        }
+        .dump(
+            &merge_labels(),
+            &make_lv(b"a", b"b", b"c"),
+            MergeOutcome::ConflictAll,
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            indoc! {
+                "<<<<<<< my_label
+                a
+                ||||||| old_label
+                b
+                =======
+                c
+                >>>>>>> your_label
+                "
+            }
+        );
+    }
+    #[test]
+    fn test_conflict_mine_yours() {
+        let mut result = vec![];
+        Dumper {
+            force_nl: false,
+            stdout: &mut result,
+        }
+        .dump(
+            &merge_labels(),
+            &make_lv(b"a\n", b"b\n", b"c\n"),
+            MergeOutcome::ConflictMineYours,
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            indoc! {
+                "<<<<<<< my_label
+                a
+                =======
+                c
+                >>>>>>> your_label
+                "
+            }
+        );
+        result.clear();
+        Dumper {
+            force_nl: false,
+            stdout: &mut result,
+        }
+        .dump(
+            &merge_labels(),
+            &make_lv(b"a", b"b", b"c"),
+            MergeOutcome::ConflictMineYours,
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            indoc! {
+                "<<<<<<< my_label
+                a=======
+                c>>>>>>> your_label
+                "
+            }
+        );
+        result.clear();
+        Dumper {
+            force_nl: true,
+            stdout: &mut result,
+        }
+        .dump(
+            &merge_labels(),
+            &make_lv(b"a", b"b", b"c"),
+            MergeOutcome::ConflictMineYours,
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result),
+            indoc! {
+                "<<<<<<< my_label
+                a
+                =======
+                c
+                >>>>>>> your_label
                 "
             }
         );
