@@ -496,7 +496,6 @@ fn load(
             }
             b"-E" | b"--show-overlap" => {
                 show_overlap = true;
-                ed = true;
             }
             b"-m" | b"--merge" => {
                 merge = true;
